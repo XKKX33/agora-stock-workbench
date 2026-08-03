@@ -12,11 +12,16 @@
 按市场日历取,则该票在目标日没有K线 → 标签缺失 → 样本丢弃,这是正确行为。
 
 标签缺失原因必须分类上报,不能只给一个"缺失"计数:
-- future_not_reached : 市场日历上还没走到第 N 个交易日(正常等待,会自愈)
+- future_not_reached : 目标日超出已有行情的最大日期(正常等待,会自愈)
 - calendar_missing   : 日历本身没覆盖到那天(要回补 trade_cal,是人的活)
-- target_bar_missing : 目标日该票无行情(停牌/退市)
+- target_bar_missing : 目标日已在行情覆盖范围内,该票却无行情(停牌/退市)
 - base_missing       : as_of 当日无基准收盘价
 把"要等"和"要修"混成一个数字,就没人会去修。
+
+判"要等还是要修"看的是 **行情末日**(CloseLookup.max_day),不是日历末日:
+日历是主动往前多拉的(见 run_scan._calendar_lookahead_end),它的末日在未来,
+说明不了"现在走到哪儿了"。早先用日历末日当判据,导致每个未到期样本都被
+误报成 calendar_missing 而进了 needs_attention——把正常等待当成了缺数据。
 """
 
 from __future__ import annotations
@@ -127,6 +132,7 @@ class CloseLookup:
     def __init__(self, daily: pd.DataFrame) -> None:
         if daily is None or daily.empty:
             self._map: Dict[tuple, float] = {}
+            self._max_day: Optional[str] = None
             return
         frame = daily[["ts_code", "trade_date", "close"]].dropna(subset=["close"])
         self._map = {
@@ -135,6 +141,16 @@ class CloseLookup:
                 frame["ts_code"], frame["trade_date"], frame["close"], strict=False
             )
         }
+        self._max_day = max((d for _, d in self._map), default=None)
+
+    @property
+    def max_day(self) -> Optional[str]:
+        """有行情的最大交易日。
+
+        用来区分"未来还没到"和"这只票缺行情":日历可以主动往前多拉,
+        它的末日在未来说明不了任何事;行情的末日才是"现在走到哪儿了"。
+        """
+        return self._max_day
 
     def get(self, ts_code: str, trade_date: str) -> Optional[float]:
         return self._map.get((str(ts_code), str(trade_date)))
@@ -164,7 +180,7 @@ def build_labels(
         if col not in samples.columns:
             raise ValueError(f"samples 缺少必需列: {col}")
 
-    cal_max = calendar.max_day
+    data_max = closes.max_day
     values: List[float] = []
     for ts_code, as_of in zip(samples["ts_code"], samples["as_of"], strict=False):
         as_of = str(as_of)
@@ -176,17 +192,21 @@ def build_labels(
 
         target = calendar.sessions_after(as_of, n)
         if target is None:
-            # 日历里 as_of 之后不足 n 个开市日。两种情况必须分开:
-            # 日历已延伸到 as_of 之后 -> 确实是未来没到;否则日历该回补了。
-            if cal_max is not None and cal_max > as_of:
-                report.note_missing("future_not_reached")
-            else:
-                report.note_missing("calendar_missing")
+            # 日历里 as_of 之后不足 n 个开市日。日历本该覆盖到未来
+            # (ingest 主动往前多拉),排不出目标日就是日历该回补了。
+            report.note_missing("calendar_missing")
+            values.append(float("nan"))
+            continue
+
+        if data_max is None or target > data_max:
+            # 目标交易日还没走到:正常等待,时间到了会自愈。
+            report.note_missing("future_not_reached")
             values.append(float("nan"))
             continue
 
         future = closes.get(ts_code, target)
         if future is None:
+            # 目标日已在行情覆盖范围内却查不到这只票 -> 停牌/退市。
             report.note_missing("target_bar_missing")
             values.append(float("nan"))
             continue

@@ -183,7 +183,7 @@ def _run_all():
                test_scoring_and_gates, test_dedup_top):
         print(f"[{fn.__name__}]")
         fn()
-    print("\nALL PASSED ✅")
+    print("\nALL PASSED")
 
 
 if __name__ == "__main__":

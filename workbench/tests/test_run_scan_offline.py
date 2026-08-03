@@ -197,7 +197,7 @@ def _run_all():
     for fn in (test_store_pit_filters, test_run_scan_offline_end_to_end):
         print(f"[{fn.__name__}]")
         fn()
-    print("\nALL PASSED ✅")
+    print("\nALL PASSED")
 
 
 if __name__ == "__main__":

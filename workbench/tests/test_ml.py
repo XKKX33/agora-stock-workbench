@@ -100,14 +100,16 @@ def test_labels_horizon_and_missing_reasons():
     codes = ["000001.SZ", "000002.SZ"]
     # 000002 在第 6 个交易日停牌(它的 T+5 目标日无行情)
     daily = _daily_frame(codes, days, drop=(("000002.SZ", days[5]),))
-    cal = TradingCalendar(days)
+    # 日历比行情多覆盖 4 天未来(线上 ingest 就是这么拉的):
+    # 这样"目标日还没走到"和"日历该回补了"才是两个可分辨的状态。
+    cal = TradingCalendar(_DAYS[:14])
     closes = CloseLookup(daily)
 
     samples = pd.DataFrame([
         {"ts_code": "000001.SZ", "as_of": days[0]},   # 正常:T+5 = days[5]
         {"ts_code": "000002.SZ", "as_of": days[0]},   # 目标日停牌
-        {"ts_code": "000001.SZ", "as_of": days[6]},   # 日历还没走到 T+5
-        {"ts_code": "000001.SZ", "as_of": days[9]},   # 日历末日:分不清等/修 -> 报修
+        {"ts_code": "000001.SZ", "as_of": days[6]},   # T+5=第12天,行情还没到
+        {"ts_code": "000001.SZ", "as_of": days[9]},   # T+5 超出日历末日 -> 报修
         {"ts_code": "999999.SZ", "as_of": days[0]},   # 基准日无收盘价
     ])
     labels, report = build_labels(samples, calendar=cal, closes=closes, horizon="ret5")

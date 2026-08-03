@@ -39,9 +39,16 @@ def _check(name, cond):
 
 # ---------------------------------------------------------------- 合成数据
 
-# 20 个连续交易日
+# 20 个连续交易日(有行情的范围)
 _DATES = [f"202506{d:02d}" for d in range(1, 21)]
-_EXCH_CAL = pd.DataFrame({"exchange": "SSE", "cal_date": _DATES, "is_open": 1})
+# 日历刻意比行情多覆盖一段未来:线上 ingest 就是这么拉的
+# (见 run_scan._calendar_lookahead_end),否则未到期样本会被误判成缺数据。
+_FUTURE_DATES = [f"202507{d:02d}" for d in range(1, 11)]
+_EXCH_CAL = pd.DataFrame({
+    "exchange": "SSE",
+    "cal_date": _DATES + _FUTURE_DATES,
+    "is_open": 1,
+})
 
 
 def _seed(store: Store, *, as_of_idx: int, price_paths: dict):
@@ -136,6 +143,86 @@ def test_lookahead_pending():
             _check("ret3 计入 pending", report.pending["ret3"] == 1)
             _check("pending 原因是未来未到",
                    report.pending_reasons["ret3"].get("future_not_reached", 0) == 1)
+
+
+def test_forward_calendar_keeps_pending_out_of_attention():
+    """未到期的样本一律进 future_not_reached,needs_attention 必须为空。
+
+    回归线上真实误报:ingest 曾把日历只拉到 as_of(end=as_of),于是
+    sessions_after 永远排不出未来第 N 个开市日,正常等待被记成
+    calendar_missing 并进了 needs_attention——每天报一堆"要人处理的缺数据",
+    实际什么都不用做。判据改成"行情末日"后这类误报必须归零。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        with Store(os.path.join(tmp, "t.duckdb")) as store:
+            paths = {"A.SH": [10 + i * 0.1 for i in range(20)]}
+            _seed(store, as_of_idx=19, price_paths=paths)
+            as_of = _DATES[19]  # 行情最后一日:1/3/5/10 日全都还没走到
+            _seed_picks(store, as_of, [{"ts_code": "A.SH", "rank": 1, "total": 0.8}])
+
+            report = backfill_returns(store, exchange="SSE")
+
+            _check("四个期限全部待回填", sum(report.pending.values()) == 4)
+            for col in HORIZONS:
+                _check(f"{col} 归类未来未到",
+                       report.pending_reasons[col].get("future_not_reached", 0) == 1)
+            _check("不产生任何要人处理的缺数据",
+                   sum(report.needs_attention().values()) == 0)
+
+
+def test_short_calendar_still_reports_calendar_missing():
+    """日历真的不够长时(旧 ingest 的样子),必须如实报 calendar_missing。
+
+    把误报压掉不能变成"什么都不报":日历没回补是真要人处理的活,
+    否则回填会一直静默地停在那里。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        with Store(os.path.join(tmp, "t.duckdb")) as store:
+            short_cal = pd.DataFrame({
+                "exchange": "SSE", "cal_date": _DATES, "is_open": 1,
+            })
+            store.upsert("trade_cal", short_cal, keys=("exchange", "cal_date"))
+            rows = [{
+                "ts_code": "A.SH", "trade_date": d,
+                "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+                "pre_close": 10.0, "pct_chg": 0.0, "vol": 1e6, "amount": 1e7,
+            } for d in _DATES]
+            store.upsert("daily", pd.DataFrame(rows), keys=("ts_code", "trade_date"))
+            _seed_picks(store, _DATES[19],
+                        [{"ts_code": "A.SH", "rank": 1, "total": 0.8}])
+
+            report = backfill_returns(store, exchange="SSE")
+
+            _check("日历不够长时报 calendar_missing",
+                   report.pending_reasons["ret1"].get("calendar_missing", 0) == 1)
+            _check("日历该回补要进 needs_attention",
+                   report.needs_attention().get("calendar_missing", 0) == 4)
+
+
+def test_calendar_lookahead_covers_longest_horizon():
+    """ingest 拉日历的末日必须真的越过最长回填期限,否则误报会复发。
+
+    这是上面两个用例的上游:日历末日 = as_of 时,未到期样本无从判别。
+    不复述实现里的算式(那样测的是"我抄对了没有"),改成校验实际结果:
+    末日严格在未来,且窗口内的工作日在扣掉一整段连休后仍够 max(HORIZONS) 个。
+    """
+    from datetime import datetime, timedelta
+
+    from engine.run_scan import _HOLIDAY_BUFFER_DAYS, _calendar_lookahead_end
+
+    end = _calendar_lookahead_end()
+    today = datetime.now()
+    _check("末日格式为 YYYYMMDD", len(end) == 8 and end.isdigit())
+    _check("末日严格在今天之后", end > today.strftime("%Y%m%d"))
+
+    end_dt = datetime.strptime(end, "%Y%m%d")
+    weekdays = sum(
+        1 for i in range(1, (end_dt - today).days + 1)
+        if (today + timedelta(days=i)).weekday() < 5
+    )
+    max_sessions = max(HORIZONS.values())
+    _check("扣掉一整段连休后仍覆盖最长期限",
+           weekdays - _HOLIDAY_BUFFER_DAYS >= max_sessions)
 
 
 def test_evaluate_metrics():
@@ -346,6 +433,9 @@ def test_run_postmortem_json():
 _TESTS = (
     test_backfill_correctness,
     test_lookahead_pending,
+    test_forward_calendar_keeps_pending_out_of_attention,
+    test_short_calendar_still_reports_calendar_missing,
+    test_calendar_lookahead_covers_longest_horizon,
     test_suspended_stock_uses_market_calendar,
     test_picks_idempotent_by_as_of,
     test_picks_old_pk_migrates_to_business_key,
@@ -377,7 +467,9 @@ def _run_all():
         for name, reason in failed:
             print(f"  - {name}: {reason}")
         raise SystemExit(1)
-    print("ALL PASSED ✅")
+    # 不用 emoji:Windows 控制台是 GBK,✅ 会抛 UnicodeEncodeError,
+    # 让"全部通过"的一次运行以非零退出码结束,CI 里看起来像失败。
+    print("ALL PASSED")
 
 
 if __name__ == "__main__":

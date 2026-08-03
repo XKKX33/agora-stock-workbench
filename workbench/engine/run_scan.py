@@ -42,6 +42,10 @@ from .universe import (
 )
 
 
+# 日历前瞻的假期余量(自然日):A 股最长连休(春节/国庆)约 10 天,取 14 天留空间。
+_HOLIDAY_BUFFER_DAYS = 14
+
+
 @dataclass
 class ScanResult:
     run_id: str
@@ -67,6 +71,21 @@ def _make_client(settings: Dict[str, Any]) -> TushareClient:
     )
 
 
+def _calendar_lookahead_end() -> str:
+    """日历要拉到的末日:今天 + 覆盖最长回填期限所需的余量。
+
+    期限从 postmortem.HORIZONS 取,避免这里写死天数后与回填口径脱钩。
+    HORIZONS 是"未来第 N 个开市日",换算成自然日按 2 倍粗放折算(周末),
+    再加一段假期余量(春节/国庆连休最长约 10 天)。宁可多拉——日历多几天
+    只是多几行 trade_cal,而少拉会让未到期样本被误判成缺数据。
+    """
+    from .postmortem import HORIZONS
+
+    max_sessions = max(HORIZONS.values())
+    days_ahead = max_sessions * 2 + _HOLIDAY_BUFFER_DAYS
+    return (datetime.now() + timedelta(days=days_ahead)).strftime("%Y%m%d")
+
+
 def _ensure_data(
     store: Store,
     settings: Dict[str, Any],
@@ -87,7 +106,12 @@ def _ensure_data(
     assert client is not None
     as_of, rows = confirm_latest_trade_date(client, min_rows)
     start_cal = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
-    ingest_calendar(store, client, start_cal, as_of)
+    # 日历要往前多拉一段,不能止于 as_of。回填 T+N 收益需要知道"as_of 之后
+    # 第 N 个开市日是哪天",而日历末日等于 as_of 时 sessions_after 永远返回
+    # None,于是"还在等未来"会被误判成"日历该回补了"(calendar_missing 进
+    # needs_attention,被当成要人处理的缺数据)。往前取到覆盖最长期限之后,
+    # 未到期的样本才会正确落到 future_not_reached。
+    ingest_calendar(store, client, start_cal, _calendar_lookahead_end())
     ingest_snapshot(store, client, as_of)
     return as_of, rows
 

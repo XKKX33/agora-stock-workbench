@@ -39,9 +39,9 @@ class BackfillReport:
     filled: Dict[str, int] = field(default_factory=dict)   # 每期限回填条数
     pending: Dict[str, int] = field(default_factory=dict)  # 每期限仍待回填
     # 待回填的具体原因分布,便于把"缺数据"和"未来未到"区分开:
-    #   future_not_reached —— 市场日历上还没到第 N 个交易日(正常等待)
+    #   future_not_reached —— 目标交易日还没走到(超出已入库行情的最大日期,正常等待)
     #   calendar_missing   —— 日历本身没覆盖到那一天(需要回补 trade_cal)
-    #   target_bar_missing —— 目标交易日该票无行情(停牌/退市/未回补日线)
+    #   target_bar_missing —— 目标交易日全市场有行情、该票没有(停牌/退市)
     #   base_missing       —— as_of 当日无基准收盘价
     pending_reasons: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
@@ -64,13 +64,18 @@ def backfill_returns(store: Store, exchange: str = "SSE") -> BackfillReport:
     口径按市场交易日历(见 Store.future_close),停牌不顶替、不臆造。
     无法回填时记录**原因**而非只计一个 pending 数字:
     "日历没回补"和"未来还没到"在数字上都是 pending,但前者要人处理。
+
+    区分"等未来"与"缺数据"的判据是**已入库行情的最大日期**(data_max),
+    不是日历末日:日历是我们主动往前多拉的(见 run_scan._calendar_lookahead_end),
+    它的末日在未来,说明不了任何事。目标日 > data_max 就是未来还没到;
+    目标日 <= data_max 却查不到该票的收盘价,才是这只票真的缺行情。
     """
     report = BackfillReport(
         filled={c: 0 for c in HORIZONS},
         pending={c: 0 for c in HORIZONS},
         pending_reasons={c: {} for c in HORIZONS},
     )
-    cal_max = store.calendar_max(exchange)
+    data_max = store.latest_date()
 
     def _note(col: str, reason: str) -> None:
         report.pending[col] += 1
@@ -92,16 +97,19 @@ def backfill_returns(store: Store, exchange: str = "SSE") -> BackfillReport:
 
             target = store.sessions_after(exchange, as_of, n)
             if target is None:
-                # 日历里 as_of 之后不足 n 个开市日。两种可能要分开:
-                # 日历已覆盖到很晚 -> 确实是未来没到;否则是日历该回补了。
-                if cal_max is not None and cal_max > as_of:
-                    _note(col, "future_not_reached")
-                else:
-                    _note(col, "calendar_missing")
+                # 日历里 as_of 之后不足 n 个开市日。日历本该被拉到未来
+                # (见 run_scan._calendar_lookahead_end),拉不出来就是日历该回补了。
+                _note(col, "calendar_missing")
+                continue
+
+            if data_max is None or target > data_max:
+                # 目标交易日还没走到(或本地一行行情都没有):正常等待,会自愈。
+                _note(col, "future_not_reached")
                 continue
 
             fut = store.close_on(ts_code, target)
             if fut is None:
+                # 目标日已在已入库范围内,却查不到这只票 -> 停牌/退市,真的缺行情。
                 _note(col, "target_bar_missing")
                 continue
 
