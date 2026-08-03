@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>市场情绪 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+  <style>
+    /* A股习惯:涨=红、跌=绿(页内自定义) */
+    .up { color: #e05a5a; }
+    .down { color: #3da678; }
+    .mf-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .mf-toolbar .field { width: 190px; }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div><div class="eyebrow">Market context</div><h1>市场情绪</h1><p>用候选通过率、行业热度和资金确认观察市场环境，不展示没有数据来源的情绪分数。</p></div>
+        <button id="refresh" class="button">刷新</button>
+      </header>
+
+      <section class="grid grid-3">
+        <article class="panel metric span-2"><span class="metric-label">当前结构</span><strong id="stage-label" class="metric-value">—</strong><span class="metric-note">由最新候选池门槛通过率判断</span></article>
+        <article class="panel metric"><span class="metric-label">门槛通过率</span><strong id="stage-ratio" class="metric-value accent">—</strong><span class="metric-note">不是涨跌预测</span></article>
+      </section>
+
+      <section class="grid grid-3" style="margin-top:16px">
+        <article class="panel span-2">
+          <div class="panel-header"><div><h2>行业热度</h2><p>来自最新扫描批次</p></div></div>
+          <div class="table-wrap"><table><thead><tr><th>排名</th><th>行业</th><th>热度</th><th>上涨占比</th></tr></thead><tbody id="industry-rows"></tbody></table></div>
+        </article>
+        <article class="panel raised">
+          <div class="panel-header"><div><h2>资金确认分布</h2><p>只做后置确认</p></div></div>
+          <div id="money-classes" class="stack"></div>
+        </article>
+      </section>
+
+      <section class="panel" style="margin-top:16px" aria-label="行业资金流向">
+        <div class="panel-header">
+          <div><h2>行业资金流向</h2><p id="mf-industry-note">按最新资金流交易日聚合 · 净流入红涨绿跌</p></div>
+          <div class="mf-toolbar">
+            <input id="mf-filter" class="field" placeholder="筛选行业" autocomplete="off" aria-label="筛选行业资金流向">
+            <button id="mf-refresh" class="button" type="button">刷新</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>排名</th><th>行业</th><th>净流入</th><th>大单净额</th><th>超大单净额</th><th>覆盖股票</th></tr></thead>
+            <tbody id="industry-mf-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-header"><div><h2>新闻与社区舆情</h2><p>没有真实数据源时不生成分数</p></div><div id="community-state"></div></div>
+        <p id="community-reason" class="muted"></p>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/sentiment.js"></script>
+</body>
+</html>

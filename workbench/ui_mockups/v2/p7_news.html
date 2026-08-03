@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>舆情监控 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+  <style>
+    .collect-bar { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; justify-content: flex-end; }
+    .collect-bar .field { width: 250px; }
+    .metric-distribution { display: flex; flex-wrap: wrap; gap: 16px; }
+    .dist-cell { display: grid; gap: 2px; }
+    .dist-num { font: 600 16px var(--font-mono); color: var(--text); }
+    .dist-label { color: #718096; font-size: 10px; }
+    .news-item { padding: 14px 0; border-bottom: 1px solid var(--line-soft); }
+    .news-item:first-child { padding-top: 0; }
+    .news-item:last-child { border-bottom: 0; padding-bottom: 0; }
+    .news-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .news-title { font: 600 14px var(--font-display); color: var(--text); line-height: 1.45; }
+    .news-title:hover { color: #9abce3; }
+    .news-summary { margin: 6px 0 0; color: var(--text-muted); font-size: 12px; }
+    .news-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; color: #718096; font-size: 11px; }
+    .news-empty { display: grid; gap: 12px; justify-items: center; align-content: center; }
+    .news-empty .reason { font-family: var(--font-mono); color: var(--warning); font-size: 11px; }
+    .news-empty .detail { color: var(--text); font-size: 14px; }
+    .source-link:hover { color: #9abce3; }
+    .industry-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 0 12px; border-bottom: 1px solid var(--line-soft); margin-bottom: 4px; }
+    .industry-chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border: 1px solid var(--line-soft); border-radius: 999px; background: transparent; color: var(--text); font-size: 12px; line-height: 1.4; cursor: pointer; transition: border-color .15s, background .15s; }
+    .industry-chip:hover { border-color: #9abce3; }
+    .industry-chip.active { background: rgba(62, 198, 255, .08); border-color: #9abce3; }
+    .industry-chip .cnt { font-family: var(--font-mono); font-size: 11px; color: #8d9aab; }
+    .industry-chip .pos { color: #7dc6a2; }
+    .industry-chip .neg { color: #e0959e; }
+    .industry-chip .mid { color: #9abce3; }
+    .industry-chip .und { color: #d4b46d; }
+    .industry-note, .industry-empty { color: #718096; font-size: 11px; }
+    @media (max-width: 1060px) { .collect-bar .field { width: 100%; } }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div>
+          <div class="eyebrow">Market intelligence</div>
+          <h1>舆情监控</h1>
+          <p>查看已入库的新闻原文、来源登记与采集状态。没有采集链路时如实说明缺在哪一环，不显示编造的情绪。</p>
+        </div>
+        <div class="collect-bar">
+          <span id="collect-state" class="muted"></span>
+          <input id="trade-date" class="field" placeholder="交易日 YYYYMMDD（留空取最近开市日）">
+          <button id="collect-btn" class="button primary">一键采集</button>
+        </div>
+      </header>
+
+      <section class="grid grid-4">
+        <article class="panel metric"><span class="metric-label">市场结构</span><strong id="metric-stage" class="metric-value">—</strong><span id="metric-stage-note" class="metric-note">来自最近一次扫描批次</span></article>
+        <article class="panel metric"><span class="metric-label">舆情状态</span><strong id="metric-news-state" class="metric-value">—</strong><span id="metric-news-note" class="metric-note">—</span></article>
+        <article class="panel metric"><span class="metric-label">情绪样本</span><strong id="metric-sample" class="metric-value">—</strong><span id="metric-sample-note" class="metric-note">情绪为规则推断，未人工核验</span></article>
+        <article class="panel metric"><span class="metric-label">舆情覆盖</span><strong id="metric-coverage" class="metric-value">—</strong><span id="metric-coverage-note" class="metric-note">—</span></article>
+      </section>
+
+      <section class="grid grid-3" style="margin-top:16px">
+        <article class="panel span-2">
+          <div class="panel-header">
+            <div><h2>今日舆情</h2><p id="digest-meta">—</p></div>
+            <div id="digest-state"></div>
+          </div>
+          <div id="industry-bar" class="industry-bar"><div class="industry-empty">板块加载中…</div></div>
+          <div id="news-list" class="stack" style="margin-top:10px"><div class="empty-state">加载中…</div></div>
+        </article>
+        <article class="panel raised">
+          <div class="panel-header"><div><h2>来源登记</h2><p>舆情数据从哪里来、凭什么可以采</p></div></div>
+          <div id="sources-box"><div class="empty-state">加载中…</div></div>
+        </article>
+      </section>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-header"><div><h2>采集历史</h2><p>最近的一次采集任务</p></div></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>任务</th><th>交易日</th><th>状态</th><th>创建时间</th><th>完成时间</th></tr></thead>
+            <tbody id="history-rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/news.js"></script>
+</body>
+</html>

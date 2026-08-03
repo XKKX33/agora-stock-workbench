@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>选股台 · Bento 网格风 · 样张 02</title>
+<style>
+  :root{
+    --canvas:#0c0c0d;
+    --tile:#161617;
+    --line:rgba(255,255,255,0.08);
+    --line-strong:rgba(255,255,255,0.14);
+    --text:#f4f4f5;
+    --muted:#a1a1aa;
+    --dim:#71717a;
+    --violet:#8b5cf6;
+    --cyan:#22d3ee;
+    --up:#f43f5e;   /* 涨=红 */
+    --down:#10b981; /* 跌=绿 */
+    --radius:24px;
+    --gap:16px;
+    --sans:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html{-webkit-text-size-adjust:100%;}
+  body{
+    background:var(--canvas);
+    color:var(--text);
+    font-family:var(--sans);
+    line-height:1.5;
+    min-height:100vh;
+    position:relative;
+    overflow-x:hidden;
+  }
+  /* atmosphere: soft radial wash + fine grain overlay */
+  body::before{
+    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(60% 45% at 22% 12%, rgba(139,92,246,0.16), transparent 70%),
+      radial-gradient(50% 40% at 88% 22%, rgba(34,211,238,0.10), transparent 70%);
+  }
+  .grain{
+    position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0.05;
+    mix-blend-mode:overlay;
+  }
+  .wrap{position:relative;z-index:1;max-width:1440px;margin:0 auto;padding:40px 32px 64px;}
+
+  header.page{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:28px;}
+  .brand{display:flex;flex-direction:column;gap:6px;}
+  .brand .kicker{font-size:11px;letter-spacing:0.28em;text-transform:uppercase;color:var(--dim);}
+  .brand h1{font-size:26px;font-weight:650;letter-spacing:-0.01em;}
+  .brand h1 .accent{color:var(--violet);}
+  .headmeta{display:flex;gap:22px;align-items:baseline;}
+  .headmeta .m{display:flex;flex-direction:column;gap:2px;text-align:right;}
+  .headmeta .m b{font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums;color:var(--text);font-weight:600;}
+  .headmeta .m span{font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--dim);}
+
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    grid-auto-rows:200px;
+    gap:var(--gap);
+  }
+  .tile{
+    background:var(--tile);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:24px;
+    overflow:hidden;
+    position:relative;
+    transition:transform .2s ease-out, box-shadow .2s ease-out, border-color .2s ease-out;
+    outline:none;
+    display:flex;flex-direction:column;
+  }
+  .tile:hover,.tile:focus-visible{
+    transform:scale(1.01);
+    box-shadow:0 18px 44px -18px rgba(0,0,0,0.75);
+    border-color:var(--line-strong);
+  }
+  .tile:focus-visible{
+    box-shadow:0 0 0 2px var(--canvas),0 0 0 4px var(--cyan),0 18px 44px -18px rgba(0,0,0,0.75);
+  }
+  .t-title{font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:var(--dim);font-weight:600;display:flex;align-items:center;gap:8px;}
+  .t-title .dot{width:6px;height:6px;border-radius:50%;background:var(--violet);flex:none;}
+  .t-title .dot.cy{background:var(--cyan);}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums;}
+
+  /* spans */
+  .hero{grid-column:span 2;grid-row:span 2;}
+  .attr{grid-column:span 2;grid-row:span 2;}
+  .list{grid-column:span 2;}
+  .perf{grid-column:span 2;}
+
+  /* HERO */
+  .hero .badgeline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px;}
+  .hero .code{font-family:var(--mono);font-size:13px;color:var(--cyan);letter-spacing:0.04em;}
+  .hero .name{font-size:20px;font-weight:650;}
+  .chip{font-size:10.5px;padding:3px 9px;border-radius:999px;border:1px solid var(--line-strong);color:var(--muted);letter-spacing:0.06em;}
+  .chip.v{color:var(--violet);border-color:rgba(139,92,246,0.4);background:rgba(139,92,246,0.08);}
+  .hero .scorewrap{display:flex;align-items:flex-end;gap:14px;margin-top:auto;}
+  .hero .score{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:clamp(56px,6.4vw,72px);line-height:0.9;font-weight:650;letter-spacing:-0.02em;background:linear-gradient(120deg,var(--text),var(--violet));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+  .hero .scoretag{font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--dim);padding-bottom:10px;}
+  .hero .facts{display:flex;gap:22px;margin-top:14px;flex-wrap:wrap;}
+  .hero .facts .f b{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:17px;font-weight:600;}
+  .hero .facts .f span{display:block;font-size:10px;color:var(--dim);letter-spacing:0.12em;text-transform:uppercase;margin-top:2px;}
+  .up-c{color:var(--up);} .down-c{color:var(--down);}
+  .hero .spark{position:absolute;right:20px;top:78px;width:180px;height:58px;opacity:.9;}
+  .hero .reason{margin-top:14px;font-size:12px;color:var(--muted);border-left:2px solid var(--violet);padding-left:12px;line-height:1.55;}
+  .hero .flow{margin-top:10px;font-size:11.5px;color:var(--cyan);letter-spacing:0.04em;}
+
+  /* ATTR bars */
+  .attr .cats{margin-top:14px;display:flex;flex-direction:column;gap:9px;overflow:hidden;}
+  .catrow{display:flex;flex-direction:column;gap:5px;}
+  .cathead{display:flex;align-items:baseline;justify-content:space-between;gap:8px;}
+  .cathead .cn{font-size:12px;font-weight:650;color:var(--text);letter-spacing:0.04em;}
+  .cathead .cn small{color:var(--dim);font-weight:400;letter-spacing:0.1em;margin-left:6px;text-transform:uppercase;font-size:9px;}
+  .cathead .cv{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:12px;color:var(--cyan);}
+  .facbars{display:flex;flex-direction:column;gap:3px;padding-left:2px;}
+  .facbar{display:grid;grid-template-columns:104px 1fr 46px;align-items:center;gap:8px;}
+  .facbar .fn{font-family:var(--mono);font-size:9.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .facbar .track{height:7px;border-radius:4px;background:rgba(255,255,255,0.05);overflow:hidden;}
+  .facbar .fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--violet),var(--cyan));}
+  .facbar .fv{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:9.5px;color:var(--muted);text-align:right;}
+  .facbar.zero .fill{background:var(--dim);opacity:.4;}
+
+  /* LIST table */
+  .list table{width:100%;border-collapse:collapse;margin-top:12px;}
+  .list th,.list td{text-align:left;padding:7px 8px;font-size:12px;border-bottom:1px solid var(--line);}
+  .list th{font-size:9.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--dim);font-weight:600;}
+  .list td.n,.list th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;}
+  .list tr.real td{color:var(--text);}
+  .list tr.real .rankpill{background:var(--up);color:#fff;}
+  .rankpill{display:inline-block;min-width:18px;text-align:center;font-family:var(--mono);font-size:10px;padding:1px 5px;border-radius:6px;background:rgba(255,255,255,0.08);color:var(--muted);}
+  .list td .c{font-family:var(--mono);color:var(--cyan);font-size:11px;}
+  .list td .nm{color:var(--muted);font-size:11px;margin-left:6px;}
+  .tag-ex{color:var(--dim);font-size:9.5px;border:1px solid var(--line);border-radius:5px;padding:0 5px;}
+  .tag-real{color:var(--up);font-size:9.5px;border:1px solid rgba(244,63,94,0.4);border-radius:5px;padding:0 5px;}
+  .note{font-size:10px;color:var(--dim);margin-top:8px;letter-spacing:0.02em;}
+
+  /* FUNNEL */
+  .funnel{display:flex;flex-direction:column;gap:8px;margin-top:16px;align-items:center;justify-content:center;flex:1;}
+  .fstep{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid var(--line);}
+  .fstep .lbl{font-size:11px;color:var(--muted);}
+  .fstep .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:16px;font-weight:650;}
+  .fstep.s1{width:100%;} .fstep.s2{width:64%;} .fstep.s3{width:38%;border-color:rgba(244,63,94,0.5);background:rgba(244,63,94,0.1);}
+  .fstep.s3 .v{color:var(--up);}
+  .farrow{color:var(--dim);font-size:10px;line-height:1;}
+
+  /* INDUSTRY */
+  .indrow{display:grid;grid-template-columns:64px 1fr 42px;align-items:center;gap:8px;margin-top:8px;}
+  .indrow .in{font-size:11px;color:var(--muted);white-space:nowrap;}
+  .indrow.top .in{color:var(--text);font-weight:600;}
+  .indrow .track{height:8px;border-radius:4px;background:rgba(255,255,255,0.05);overflow:hidden;}
+  .indrow .fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--cyan),var(--violet));}
+  .indrow.top .fill{background:var(--up);}
+  .indrow .iv{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:11px;text-align:right;color:var(--muted);}
+  .indrow.top .iv{color:var(--up);}
+
+  /* PIPS / health */
+  .pipset{display:flex;flex-direction:column;gap:9px;margin-top:12px;}
+  .piprow{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+  .piprow .pl{font-family:var(--mono);font-size:11px;color:var(--muted);}
+  .pips{display:flex;gap:4px;}
+  .pip{width:16px;height:9px;border-radius:3px;background:rgba(255,255,255,0.09);}
+  .pip.on{background:var(--cyan);}
+  .pip.on.v{background:var(--violet);}
+  .ratios{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap;}
+  .ratio{flex:1;min-width:70px;background:rgba(255,255,255,0.04);border:1px solid var(--line);border-radius:10px;padding:8px 9px;}
+  .ratio b{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:14px;font-weight:600;}
+  .ratio span{display:block;font-size:9px;color:var(--dim);letter-spacing:0.08em;margin-top:2px;font-family:var(--mono);}
+
+  /* FUND */
+  .fundgrid{display:flex;gap:10px;margin-top:12px;}
+  .fcell{flex:1;border-radius:12px;padding:11px 12px;border:1px solid var(--line);}
+  .fcell.out{background:rgba(16,185,129,0.09);border-color:rgba(16,185,129,0.4);}
+  .fcell.in{background:rgba(244,63,94,0.09);border-color:rgba(244,63,94,0.4);}
+  .fcell b{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:17px;font-weight:650;display:block;}
+  .fcell.out b{color:var(--down);} .fcell.in b{color:var(--up);}
+  .fcell span{font-size:9.5px;color:var(--dim);letter-spacing:0.1em;text-transform:uppercase;font-family:var(--mono);}
+  .fclass{margin-top:12px;display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;background:linear-gradient(90deg,rgba(16,185,129,0.12),rgba(244,63,94,0.12));border:1px solid var(--line-strong);}
+  .fclass .fcls-t{font-size:9px;color:var(--dim);letter-spacing:0.14em;text-transform:uppercase;}
+  .fclass b{font-size:13px;font-weight:650;color:var(--text);}
+  .fdays{margin-top:10px;display:flex;align-items:center;gap:10px;}
+  .fdays .fdl{font-size:10px;color:var(--dim);letter-spacing:0.06em;}
+
+  /* PERF empty state */
+  .perf table{width:100%;border-collapse:collapse;margin-top:12px;}
+  .perf th,.perf td{padding:8px 6px;font-size:11px;border-bottom:1px solid var(--line);text-align:center;}
+  .perf th:first-child,.perf td:first-child{text-align:left;}
+  .perf th{font-size:9.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--dim);font-weight:600;}
+  .perf td.win{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--dim);font-size:15px;}
+  .perf td.win::after{content:"";}
+  .perf .horizon{font-family:var(--mono);color:var(--cyan);font-size:12px;}
+  .perf .capbox{margin-top:auto;padding-top:12px;display:flex;gap:10px;align-items:flex-start;}
+  .perf .capbox .ic{color:var(--violet);font-size:13px;line-height:1.2;flex:none;}
+  .perf .capbox p{font-size:11px;color:var(--muted);line-height:1.55;}
+
+  /* SCOPE */
+  .scope{background:linear-gradient(140deg,rgba(139,92,246,0.14),rgba(34,211,238,0.06));justify-content:center;align-items:flex-start;gap:10px;}
+  .scope .big{font-size:19px;font-weight:700;letter-spacing:0.01em;line-height:1.35;}
+  .scope .big .hl{color:var(--cyan);}
+  .scope .sub{font-size:11.5px;color:var(--muted);line-height:1.55;}
+  .scope .stamp{margin-top:auto;font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:0.1em;border:1px dashed var(--line-strong);border-radius:8px;padding:6px 10px;align-self:flex-start;}
+
+  /* style badge */
+  .stylebadge{position:fixed;right:14px;bottom:14px;z-index:20;font-family:var(--mono);font-size:10px;letter-spacing:0.08em;color:var(--muted);background:rgba(22,22,23,0.9);border:1px solid var(--line-strong);border-radius:999px;padding:6px 12px;backdrop-filter:blur(6px);}
+
+  /* responsive */
+  @media (max-width:768px){
+    .grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+    .hero,.attr,.list,.perf{grid-column:span 2;}
+    .hero,.attr{grid-row:span 2;}
+    .hero .spark{display:none;}
+  }
+  @media (max-width:480px){
+    .wrap{padding:24px 16px 48px;}
+    .grid{grid-template-columns:1fr;grid-auto-rows:auto;}
+    .grid .tile{grid-column:auto !important;grid-row:auto !important;}
+    .hero .spark{display:block;position:static;width:100%;margin-top:12px;}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .tile{transition:none;}
+    .tile:hover,.tile:focus-visible{transform:none;}
+  }
+</style>
+</head>
+<body>
+<svg class="grain" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><filter id="gr"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/></filter><rect width="100%" height="100%" filter="url(#gr)"/></svg>
+<div class="wrap">
+  <header class="page">
+    <div class="brand">
+      <span class="kicker">A股量化 · 选股台</span>
+      <h1>今日<span class="accent">头号候选</span>与因子归因</h1>
+    </div>
+    <div class="headmeta">
+      <div class="m"><b class="num">2026-07-30</b><span>台账日期</span></div>
+      <div class="m"><b class="num">260 → 1</b><span>候选 → 入选</span></div>
+      <div class="m"><b class="num up-c">RED＝涨</b><span>市场配色</span></div>
+    </div>
+  </header>
+
+  <main class="grid" aria-label="选股台仪表盘">
+
+    <!-- HERO -->
+    <section class="tile hero" tabindex="0" aria-label="今日头号候选 金种子酒">
+      <div class="t-title"><span class="dot"></span>今日头号候选</div>
+      <svg class="spark" viewBox="0 0 200 60" aria-hidden="true" preserveAspectRatio="none">
+        <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#f43f5e" stop-opacity="0.35"/>
+          <stop offset="1" stop-color="#f43f5e" stop-opacity="0"/>
+        </linearGradient></defs>
+        <path d="M0,52 10,50 20,51 30,47 40,48 50,44 60,45 70,41 80,42 90,38 100,36 110,37 120,32 130,30 140,31 150,26 160,24 170,20 180,16 190,10 190,60 0,60 Z" fill="url(#sg)"/>
+        <polyline points="0,52 10,50 20,51 30,47 40,48 50,44 60,45 70,41 80,42 90,38 100,36 110,37 120,32 130,30 140,31 150,26 160,24 170,20 180,16 190,10" fill="none" stroke="#f43f5e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+      <div class="badgeline" style="margin-top:10px;">
+        <span class="code">600199.SH</span>
+        <span class="name">金种子酒</span>
+        <span class="chip">白酒</span>
+      </div>
+      <div class="scorewrap">
+        <div class="score num">0.7354</div>
+        <div class="scoretag">综合分</div>
+      </div>
+      <div class="facts">
+        <div class="f"><b class="num">8.08</b><span>收盘</span></div>
+        <div class="f"><b class="num up-c">+7.45%</b><span>涨跌幅</span></div>
+        <div class="f"><b class="num" style="color:var(--violet);font-size:13px;">大资金承接型强分歧</b><span>资金分层</span></div>
+      </div>
+      <div class="reason">结构(0.18)＋题材(0.17)领先，资金：大资金承接型强分歧(＋0.04)</div>
+      <div class="flow num">▲ 20 日路径持续抬升</div>
+    </section>
+
+    <!-- ATTRIBUTION -->
+    <section class="tile attr" tabindex="0" aria-label="因子归因，合计 0.7354">
+      <div class="t-title"><span class="dot cy"></span>因子归因 · 合计 <span class="num" style="color:var(--cyan);margin-left:4px;">0.7354</span></div>
+      <div class="cats">
+        <div class="catrow">
+          <div class="cathead"><div class="cn">结构 <small>structure</small></div><div class="cv num">0.1772</div></div>
+          <div class="facbars">
+            <div class="facbar"><span class="fn">ma_stack</span><div class="track"><div class="fill" style="width:48%"></div></div><span class="fv num">0.0512</span></div>
+            <div class="facbar"><span class="fn">pos60</span><div class="track"><div class="fill" style="width:45%"></div></div><span class="fv num">0.0488</span></div>
+            <div class="facbar"><span class="fn">breakout</span><div class="track"><div class="fill" style="width:44%"></div></div><span class="fv num">0.0471</span></div>
+            <div class="facbar"><span class="fn">trend_combo</span><div class="track"><div class="fill" style="width:28%"></div></div><span class="fv num">0.0301</span></div>
+          </div>
+        </div>
+        <div class="catrow">
+          <div class="cathead"><div class="cn">题材 <small>theme</small></div><div class="cv num">0.1700</div></div>
+          <div class="facbars">
+            <div class="facbar"><span class="fn">industry_heat</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="fv num">0.1073</span></div>
+            <div class="facbar"><span class="fn">industry_lead</span><div class="track"><div class="fill" style="width:58%"></div></div><span class="fv num">0.0627</span></div>
+            <div class="facbar zero"><span class="fn">amount_top15pct</span><div class="track"><div class="fill" style="width:2%"></div></div><span class="fv num">0.0000</span></div>
+          </div>
+        </div>
+        <div class="catrow">
+          <div class="cathead"><div class="cn">MACD <small>momentum sig</small></div><div class="cv num">0.1225</div></div>
+          <div class="facbars">
+            <div class="facbar"><span class="fn">macd_bull</span><div class="track"><div class="fill" style="width:65%"></div></div><span class="fv num">0.0700</span></div>
+            <div class="facbar"><span class="fn">weekly_bull</span><div class="track"><div class="fill" style="width:49%"></div></div><span class="fv num">0.0525</span></div>
+          </div>
+        </div>
+        <div class="catrow">
+          <div class="cathead"><div class="cn">量能 <small>volume</small></div><div class="cv num">0.1170</div></div>
+          <div class="facbars">
+            <div class="facbar"><span class="fn">vol_health</span><div class="track"><div class="fill" style="width:75%"></div></div><span class="fv num">0.0800</span></div>
+            <div class="facbar"><span class="fn">amt5_20</span><div class="track"><div class="fill" style="width:35%"></div></div><span class="fv num">0.0370</span></div>
+          </div>
+        </div>
+        <div class="catrow">
+          <div class="cathead"><div class="cn">动量 <small>return</small></div><div class="cv num">0.1088</div></div>
+          <div class="facbars">
+            <div class="facbar"><span class="fn">ret20</span><div class="track"><div class="fill" style="width:52%"></div></div><span class="fv num">0.0560</span></div>
+            <div class="facbar"><span class="fn">ret60</span><div class="track"><div class="fill" style="width:48%"></div></div><span class="fv num">0.0512</span></div>
+            <div class="facbar zero"><span class="fn">pct_chg</span><div class="track"><div class="fill" style="width:3%"></div></div><span class="fv num">0.0016</span></div>
+          </div>
+        </div>
+        <div class="catrow">
+          <div class="cathead"><div class="cn">资金 <small>overlay</small></div><div class="cv num">＋0.0400</div></div>
+          <div class="facbars">
+            <div class="facbar"><span class="fn">overlay</span><div class="track"><div class="fill" style="width:37%;background:linear-gradient(90deg,var(--down),var(--up));"></div></div><span class="fv num">＋0.0400</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LIST -->
+    <section class="tile list" tabindex="0" aria-label="今日名单">
+      <div class="t-title"><span class="dot"></span>今日名单</div>
+      <table>
+        <thead>
+          <tr><th scope="col">#</th><th scope="col">代码 / 名称</th><th scope="col">行业</th><th scope="col">来源</th><th scope="col" class="n">综合分</th></tr>
+        </thead>
+        <tbody>
+          <tr class="real"><td><span class="rankpill">1</span></td><td><span class="c">600199.SH</span><span class="nm">金种子酒</span></td><td>白酒</td><td><span class="tag-real">真实台账</span></td><td class="n">0.7354</td></tr>
+          <tr><td><span class="rankpill">2</span></td><td><span class="c">002415.SZ</span><span class="nm">示例·安防电子</span></td><td>电子元件</td><td><span class="tag-ex">结构示例</span></td><td class="n">0.7102</td></tr>
+          <tr><td><span class="rankpill">3</span></td><td><span class="c">600030.SH</span><span class="nm">示例·头部券商</span></td><td>证券</td><td><span class="tag-ex">结构示例</span></td><td class="n">0.6738</td></tr>
+          <tr><td><span class="rankpill">4</span></td><td><span class="c">000792.SZ</span><span class="nm">示例·基础化工</span></td><td>化学制品</td><td><span class="tag-ex">结构示例</span></td><td class="n">0.6421</td></tr>
+          <tr><td><span class="rankpill">5</span></td><td><span class="c">600031.SH</span><span class="nm">示例·工程机械</span></td><td>工程机械</td><td><span class="tag-ex">结构示例</span></td><td class="n">0.6015</td></tr>
+          <tr><td><span class="rankpill">6</span></td><td><span class="c">000568.SZ</span><span class="nm">示例·浓香白酒</span></td><td>白酒</td><td><span class="tag-ex">结构示例</span></td><td class="n">0.5843</td></tr>
+        </tbody>
+      </table>
+      <p class="note">样张数据：头号候选为真实台账记录，名单其余为结构示例。</p>
+    </section>
+
+    <!-- FUNNEL -->
+    <section class="tile" tabindex="0" aria-label="筛选漏斗">
+      <div class="t-title"><span class="dot cy"></span>筛选漏斗</div>
+      <div class="funnel">
+        <div class="fstep s1"><span class="lbl">候选池</span><span class="v num">260</span></div>
+        <span class="farrow">▼</span>
+        <div class="fstep s2"><span class="lbl">结构化</span><span class="v num">5</span></div>
+        <span class="farrow">▼</span>
+        <div class="fstep s3"><span class="lbl">入选</span><span class="v num">1</span></div>
+      </div>
+    </section>
+
+    <!-- INDUSTRY -->
+    <section class="tile" tabindex="0" aria-label="行业热度">
+      <div class="t-title"><span class="dot"></span>行业热度</div>
+      <div class="indrow top"><span class="in">白酒 #1</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="iv num">13.22</span></div>
+      <div class="indrow"><span class="in">证券</span><div class="track"><div class="fill" style="width:75%"></div></div><span class="iv num">9.85</span></div>
+      <div class="indrow"><span class="in">电子元件</span><div class="track"><div class="fill" style="width:64%"></div></div><span class="iv num">8.40</span></div>
+      <div class="indrow"><span class="in">工程机械</span><div class="track"><div class="fill" style="width:46%"></div></div><span class="iv num">6.12</span></div>
+      <div class="indrow"><span class="in">化学制品</span><div class="track"><div class="fill" style="width:38%"></div></div><span class="iv num">5.03</span></div>
+      <p class="note">示例行业热度，仅头名为真实排名。</p>
+    </section>
+
+    <!-- MACD / VOLUME HEALTH -->
+    <section class="tile" tabindex="0" aria-label="MACD 与量能体检">
+      <div class="t-title"><span class="dot cy"></span>MACD · 量能体检</div>
+      <div class="pipset">
+        <div class="piprow"><span class="pl">macd_bull</span><div class="pips"><i class="pip on"></i><i class="pip on"></i><i class="pip on"></i><i class="pip on"></i></div></div>
+        <div class="piprow"><span class="pl">weekly_bull</span><div class="pips"><i class="pip on v"></i><i class="pip on v"></i><i class="pip on v"></i><i class="pip"></i></div></div>
+        <div class="piprow"><span class="pl">ma_stack</span><div class="pips"><i class="pip on"></i><i class="pip on"></i><i class="pip on"></i><i class="pip on"></i></div></div>
+        <div class="piprow"><span class="pl">vol_health</span><div class="pips"><i class="pip on v"></i><i class="pip on v"></i><i class="pip on v"></i><i class="pip on v"></i></div></div>
+      </div>
+      <div class="ratios">
+        <div class="ratio"><b class="num">1.427</b><span>vol5_20</span></div>
+        <div class="ratio"><b class="num">1.322</b><span>vol20_60</span></div>
+        <div class="ratio"><b class="num">1.516</b><span>amt5_20</span></div>
+      </div>
+    </section>
+
+    <!-- FUND -->
+    <section class="tile" tabindex="0" aria-label="资金分层">
+      <div class="t-title"><span class="dot"></span>资金分层</div>
+      <div class="fundgrid">
+        <div class="fcell out"><b class="num">-8494.25万</b><span>net5 总净额</span></div>
+        <div class="fcell in"><b class="num">+3440.55万</b><span>big5 大单</span></div>
+      </div>
+      <div class="fdays"><span class="fdl num">big_pos_days</span><div class="pips"><i class="pip on"></i><i class="pip on"></i><i class="pip on"></i><i class="pip"></i><i class="pip"></i></div><span class="fdl num">3/5</span></div>
+      <div class="fclass"><div><div class="fcls-t">分层判定</div><b>大资金承接型强分歧</b></div></div>
+      <p class="note">总净额流出(绿) 与 大单净流入(红) 背离 → 强分歧。</p>
+    </section>
+
+    <!-- PERF -->
+    <section class="tile perf" tabindex="0" aria-label="复盘绩效，样本积累中">
+      <div class="t-title"><span class="dot cy"></span>复盘绩效 · 前视纪律</div>
+      <table>
+        <thead>
+          <tr><th scope="col">前视窗口</th><th scope="col">样本数</th><th scope="col">RankIC</th><th scope="col">胜率</th><th scope="col">盈亏比</th><th scope="col">平均收益</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row" class="horizon">T+1</th><td class="win">—</td><td class="win">—</td><td class="win">—</td><td class="win">—</td><td class="win">—</td></tr>
+          <tr><th scope="row" class="horizon">T+3</th><td class="win">—</td><td class="win">—</td><td class="win">—</td><td class="win">—</td><td class="win">—</td></tr>
+          <tr><th scope="row" class="horizon">T+5</th><td class="win">—</td><td class="win">—</td><td class="win">—</td><td class="win">—</td><td class="win">—</td></tr>
+          <tr><th scope="row" class="horizon">T+10</th><td class="win">—</td><td class="win">—</td><td class="win">—</td><td class="win">—</td><td class="win">—</td></tr>
+        </tbody>
+      </table>
+      <div class="capbox"><span class="ic">◷</span><p>样本积累中：首条台账 2026-07-30，未来第 N 日尚未到达，按前视纪律保持空值。</p></div>
+    </section>
+
+    <!-- SCOPE -->
+    <section class="tile scope" tabindex="0" aria-label="系统定位">
+      <div class="t-title"><span class="dot"></span>系统定位</div>
+      <div class="big">研究观察池<br><span class="hl">· 非交易信号 ·</span></div>
+      <p class="sub">本台账用于因子研究与结构复盘，不产生下单指令，不构成投资建议。</p>
+      <div class="stamp">RESEARCH ONLY · NOT ORDER EXECUTION</div>
+    </section>
+
+  </main>
+</div>
+<div class="stylebadge" aria-hidden="true">样张 02 · Bento 网格风</div>
+</body>
+</html>

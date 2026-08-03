@@ -1,0 +1,50 @@
+# ── 密钥 ──────────────────────────────────────────────
+# 凭据只从环境变量读，任何 .env 都不入库
+.env
+.env.local
+*.key
+*.pem
+
+# ── 真实数据（本地资产，不入库）──────────────────────
+# DuckDB 单文件与备份、冷存 parquet、导出的扫描快照
+workbench/data/
+*.duckdb
+*.duckdb.wal
+*.duckdb.bak-*
+*.parquet
+
+# ── 外部 GPL 源码（vendor）────────────────────────────
+# TrendRadar 是 GPL-3.0，原样保留在 vendor/ 且自带 .git。
+# 不纳入本仓库：避免嵌套 repo，也避免把 GPL 代码复制进我们的版本历史。
+# 重新获取：git clone https://github.com/sansan0/TrendRadar workbench/vendor/TrendRadar
+# 加载方式见 engine/news_trendradar.py（单文件 importlib，不 import 包）
+workbench/vendor/
+
+# ── 测试与运行产物 ────────────────────────────────────
+# 本机系统 Temp 权限被拒，pytest 用项目内 --basetemp，每轮一个新目录
+.pytest-tmp*/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# 浏览器验收的临时演示实例（含副本库与截图）
+.ui-demo-*/
+.ui-check-*.png
+
+# 服务日志
+*.log
+
+# 训练产物
+workbench/data/models/
+out/
+
+# ── 环境 ──────────────────────────────────────────────
+.venv/
+venv/
+
+# ── 编辑器/系统 ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,44 @@
+# 策略:强主升-短线(迁移自 under70_strict_mainup_scan.py 默认口径)
+# 归一化后权重可直接相加,和 ≈ 1;调参只改本文件,不动代码。
+name: 强主升-短线
+
+universe:
+  board: mainboard          # 排除 300/301/688/689/8/4/9 前缀
+  exclude_st: true
+  price_max: 70             # 单价上限(元)
+  min_amount_yi: 0.8        # 成交额下限(亿元)= Tushare amount 80000 千元
+                            # 对齐 scripts/_legacy_under70_scan.py --min-amount 80000(千元)
+                            # 80000 千元 = 0.8 亿元;原写 8 相当于 8 亿元,比 skill 口径严 10 倍
+
+weights:
+  theme: 0.22               # 主线热度 / 板块共振
+  structure: 0.26           # 波浪 + 60日分位 + 均线多头
+  momentum: 0.16            # ret20 / ret60 / pct_chg
+  macd: 0.14                # 日线 + 周线动能
+  volume: 0.12              # 量能配合
+  money: 0.10               # 资金后置确认(仅确认/降级)
+
+gates:                      # 声明式硬门槛(归一化分位口径 or 原始档位)
+  structure_pct_min: 0.45   # 结构分位下限(候选池内)
+  macd_bull_min: 2          # 日线 MACD 多头档 ≥2
+  weekly_bull_min: 2        # 周线多头档 ≥2
+  vol_score_min: 2          # 量能档 ≥2
+  ret20_min: 0.05           # 20日涨幅 ≥5%
+  exclude_limit_up: false   # 收盘日线口径:不因涨停/近涨停剔除
+                            # 依据 SKILL.md「涨停不是扣分项,本质是市场确认」
+                            # (SKILL.md:996/1000/1001 明确:不得因涨停本身剔除,
+                            #  也不设"涨停股最多几只"的机械上限)
+                            # 真正的降级理由是涨停后承接失败/结构走坏/板块退潮/资金派发,
+                            # 由 money_overlay 与结构因子处理,不再用硬门槛一刀切。
+                            # 注:盘中实时任务若用户要求"不要已经涨停",单次覆盖为 true。
+
+money_overlay:              # 资金分层修正(叠加在归一化总分上,幅度小)
+  资金一致确认: 0.08
+  大资金承接型强分歧: 0.04
+  总资金认可但大单不连续: 0.01
+  资金同步分歧_降级: -0.12
+
+dedup:
+  max_per_industry: 2       # 每行业最多入选
+
+top_n: 6

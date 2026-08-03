@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>选股流程 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div><div class="eyebrow">Decision pipeline</div><h1>选股流程</h1><p>一条轨迹看清股票从候选召回到最终入选的数量变化，以及每只股票被淘汰的原因。</p></div>
+        <button id="refresh" class="button">刷新</button>
+      </header>
+
+      <section class="scan-rail">
+        <article class="scan-node"><span>01 / 候选召回</span><strong data-funnel>—</strong><span>行业、突破和种子召回</span></article>
+        <article class="scan-node"><span>02 / 完成打分</span><strong data-funnel>—</strong><span>上下文与因子完整</span></article>
+        <article class="scan-node"><span>03 / 通过门槛</span><strong data-funnel>—</strong><span>结构、动量与量能</span></article>
+        <article class="scan-node"><span>04 / 最终入选</span><strong data-funnel>—</strong><span>行业去重与资金确认</span></article>
+      </section>
+
+      <section class="grid grid-2" style="margin-top:16px">
+        <article class="panel">
+          <div class="panel-header"><div><h2>最终入选</h2><p>按综合分排序</p></div></div>
+          <div class="table-wrap"><table><thead><tr><th>排名</th><th>股票</th><th>行业</th><th>综合分</th></tr></thead><tbody id="selected-rows"></tbody></table></div>
+        </article>
+        <article class="panel">
+          <div class="panel-header"><div><h2>主要淘汰样本</h2><p>展示真实门槛原因</p></div></div>
+          <div class="table-wrap"><table><thead><tr><th>股票</th><th>行业</th><th>状态</th><th>原因</th></tr></thead><tbody id="rejected-rows"></tbody></table></div>
+        </article>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/foundry.js"></script>
+</body>
+</html>

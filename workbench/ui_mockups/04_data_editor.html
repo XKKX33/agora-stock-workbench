@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>选股台账 · 数据编辑器风</title>
+<style>
+  :root{
+    --canvas:#f7f7f8; --surface:#ffffff; --chrome:#f0f0f1;
+    --line:#ebebed; --line-strong:#e0e0e3;
+    --ink:#1a1a1e; --ink-2:#52525b; --muted:#8b8b93;
+    --indigo:#5b5bd6; --indigo-soft:#f5f7ff; --indigo-tint:#eef0ff;
+    --up:#e5484d; --down:#30a46c;               /* 涨=红 跌=绿 */
+    --row-h:36px;
+    --sans:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--canvas); color:var(--ink);
+    font-family:var(--sans); font-size:13px; line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+  }
+  .num{font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right}
+  .up{color:var(--up)} .down{color:var(--down)}
+  /* ---------- chrome / top bar ---------- */
+  .chrome{
+    position:sticky; top:0; z-index:60;
+    display:flex; align-items:center; gap:14px;
+    height:46px; padding:0 20px;
+    background:var(--chrome);
+    border-bottom:1px solid var(--line-strong);
+  }
+  .crumb{display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px}
+  .crumb b{color:var(--ink); font-weight:600}
+  .crumb .sep{color:#c4c4ca}
+  .chip{
+    display:inline-flex; align-items:center; gap:6px;
+    height:24px; padding:0 9px; border-radius:6px;
+    background:#fff; border:1px solid var(--line-strong);
+    font-size:12px; color:var(--ink-2); white-space:nowrap;
+  }
+  .chip .k{color:var(--muted); font-size:11px}
+  .chip .v{font-family:var(--mono); color:var(--ink)}
+  .chip.mono{font-family:var(--mono)}
+  .spacer{flex:1}
+  .badge-research{
+    display:inline-flex; align-items:center; gap:7px;
+    height:26px; padding:0 11px; border-radius:6px;
+    background:rgba(229,72,77,.08); border:1px solid rgba(229,72,77,.30);
+    color:#b23036; font-size:12px; font-weight:600; letter-spacing:.01em;
+  }
+  .badge-research .dot{width:6px;height:6px;border-radius:50%;background:var(--up)}
+  /* ---------- toolbar ---------- */
+  .toolbar{
+    position:sticky; top:46px; z-index:55;
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    padding:9px 20px; min-height:44px;
+    background:rgba(247,247,248,.92); backdrop-filter:saturate(1.4) blur(4px);
+    border-bottom:1px solid var(--line);
+  }
+  .seg{display:inline-flex; background:#fff; border:1px solid var(--line-strong); border-radius:8px; padding:2px; gap:2px}
+  .seg button{
+    appearance:none; border:0; background:transparent; cursor:pointer;
+    height:26px; padding:0 12px; border-radius:6px;
+    font:inherit; font-size:12px; color:var(--ink-2);
+  }
+  .seg button[aria-pressed="true"]{background:var(--indigo); color:#fff; font-weight:600}
+  .fchip{
+    display:inline-flex; align-items:center; gap:6px;
+    height:26px; padding:0 10px; border-radius:14px;
+    background:#fff; border:1px solid var(--line-strong);
+    font-size:12px; color:var(--ink-2); cursor:pointer;
+  }
+  .fchip::before{content:"✓"; font-size:10px; color:var(--indigo); opacity:.85}
+  .fchip .x{color:var(--muted); font-size:12px; margin-left:1px}
+  .readout{display:flex; align-items:center; gap:14px; font-size:12px; color:var(--muted)}
+  .readout .flow{font-family:var(--mono); color:var(--ink-2)}
+  .readout .flow b{color:var(--indigo)}
+  .readout .cnt b{color:var(--ink); font-family:var(--mono)}
+  /* ---------- table shell ---------- */
+  main{padding:14px 20px 0}
+  .table-wrap{
+    background:var(--surface);
+    border:1px solid var(--line-strong);
+    border-radius:10px;
+    overflow:auto;
+    box-shadow:0 1px 0 rgba(20,20,30,.02), 0 8px 24px -18px rgba(20,20,40,.25);
+  }
+  table{border-collapse:separate; border-spacing:0; width:100%; min-width:1360px}
+  thead th{
+    position:sticky; top:0; z-index:20;
+    background:#fbfbfc; text-align:left;
+    font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+    color:var(--muted);
+    height:34px; padding:0 12px; white-space:nowrap;
+    border-bottom:1px solid var(--line-strong);
+    user-select:none;
+  }
+  thead th .h{display:inline-flex; align-items:center; gap:5px}
+  .glyph{
+    display:inline-grid; place-items:center; width:14px; height:14px;
+    border:1px solid var(--line-strong); border-radius:3px;
+    font-family:var(--mono); font-size:9px; color:#a2a2ab; background:#fff;
+  }
+  .chev{opacity:.55}
+  th.n .h{justify-content:flex-end}
+  /* body cells */
+  tbody td{
+    height:var(--row-h); padding:0 12px;
+    border-bottom:1px solid var(--line);
+    color:var(--ink); white-space:nowrap; vertical-align:middle;
+    background:var(--surface);
+  }
+  tbody tr.data{transition:background .12s ease}
+  tbody tr.data:hover td{background:var(--indigo-soft)}
+  tbody tr.data:focus-visible{outline:none}
+  tbody tr.data:focus-visible td{background:var(--indigo-soft)}
+  tbody tr.data:focus-visible td:first-child{box-shadow:inset 3px 0 0 var(--indigo)}
+  tbody tr.sel td{background:var(--indigo-soft)}
+  tbody tr.sel td:first-child::after{
+    content:""; position:absolute; left:0; top:0; bottom:0; width:2px; background:var(--indigo);
+  }
+  /* sticky first two columns */
+  th.stick,td.stick{position:sticky; z-index:15}
+  th.c-rank,td.c-rank{left:0; width:58px}
+  th.c-code,td.c-code{left:58px; width:104px}
+  thead th.stick{z-index:30}
+  td.stick{background:var(--surface)}
+  tr.data:hover td.stick{background:var(--indigo-soft)}
+  tr.sel td.stick{background:var(--indigo-soft)}
+  td.c-code{box-shadow:1px 0 0 var(--line)}
+  th.c-code{box-shadow:1px 0 0 var(--line-strong)}
+  /* rank + disclosure */
+  .rankcell{display:flex; align-items:center; gap:7px; position:relative}
+  .rank-n{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink-2); width:14px; text-align:right}
+  tr.sel .rank-n{color:var(--indigo); font-weight:700}
+  .disc{position:relative; width:16px; height:16px; display:inline-grid; place-items:center}
+  .disc input{position:absolute; inset:0; opacity:0; margin:0; cursor:pointer}
+  .tri{width:9px; height:9px; color:var(--muted); transition:transform .15s ease}
+  .disc input:checked ~ .tri{transform:rotate(90deg); color:var(--indigo)}
+  .disc input:focus-visible ~ .tri{outline:2px solid var(--indigo); outline-offset:2px; border-radius:2px}
+  .code{font-family:var(--mono); font-size:12.5px; color:var(--ink)}
+  .name{font-weight:600}
+  .ind{color:var(--ink-2)}
+  /* score bar cell */
+  .scorecell{position:relative; overflow:hidden; border-radius:5px}
+  .scorebar{position:absolute; left:0; top:3px; bottom:3px; background:linear-gradient(90deg,#e9e9ff,#d9d9fb); border-radius:4px}
+  .scoreval{position:relative; font-family:var(--mono); font-variant-numeric:tabular-nums; font-weight:600; padding-right:2px}
+  /* pips (x/4) */
+  .pips{display:inline-flex; align-items:center; gap:3px}
+  .pips i{width:6px; height:12px; border-radius:2px; background:#e6e6ea; display:inline-block}
+  .pips i.on{background:var(--indigo)}
+  .pips .lab{font-family:var(--mono); font-size:11px; color:var(--muted); margin-left:4px}
+  /* sparkline */
+  .spark{display:block}
+  /* money chip */
+  .mchip{
+    display:inline-flex; align-items:center; gap:5px; max-width:100%;
+    height:20px; padding:0 8px; border-radius:5px; font-size:11.5px; font-weight:600;
+    border:1px solid transparent; white-space:nowrap;
+  }
+  .mchip .d{width:6px;height:6px;border-radius:50%}
+  .m-agree{background:rgba(48,163,108,.12); color:#1f7a52; border-color:rgba(48,163,108,.28)}
+  .m-agree .d{background:#30a46c}
+  .m-bigdiv{background:rgba(240,160,20,.16); color:#8a5d00; border-color:rgba(240,160,20,.40)}
+  .m-bigdiv .d{background:#e0930a}
+  .m-nocont{background:rgba(50,120,220,.12); color:#285fb0; border-color:rgba(50,120,220,.28)}
+  .m-nocont .d{background:#3278dc}
+  .m-degrade{background:rgba(120,90,200,.15); color:#5f45a6; border-color:rgba(120,90,200,.30)}
+  .m-degrade .d{background:#7a5ac8}
+  .m-unconf{background:rgba(120,120,130,.13); color:#5c5c66; border-color:rgba(120,120,130,.28)}
+  .m-unconf .d{background:#9a9aa4}
+  .attr-note{color:var(--ink-2); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; max-width:300px; display:inline-block}
+  .attr-note em{font-style:normal; color:var(--indigo); font-weight:600}
+  /* ---------- expansion panel ---------- */
+  tr.exp-row{display:none}
+  tbody:has(#exp1:checked) tr[data-for="exp1"]{display:table-row}
+  tr.exp-row > td{
+    padding:0; background:linear-gradient(180deg,#fcfcff,#fafafb);
+    border-bottom:1px solid var(--line-strong);
+    box-shadow:inset 3px 0 0 var(--indigo);
+  }
+  .panel{display:grid; grid-template-columns:1.15fr .95fr; gap:0; padding:0}
+  .panel .col{padding:16px 20px}
+  .panel .col + .col{border-left:1px solid var(--line)}
+  .panel .col.full{grid-column:1 / -1; border-top:1px solid var(--line); border-left:0; padding:14px 20px}
+  .p-title{
+    font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted);
+    margin:0 0 12px; display:flex; align-items:center; gap:8px;
+  }
+  .p-title .tot{margin-left:auto; font-family:var(--mono); color:var(--ink); font-weight:700; text-transform:none; letter-spacing:0; font-size:13px}
+  .p-title .tot small{color:var(--muted); font-weight:400}
+  /* attribution bars */
+  .attr-group{margin-bottom:11px}
+  .attr-gh{display:flex; align-items:baseline; gap:8px; margin-bottom:5px}
+  .attr-gh .gname{font-size:12px; font-weight:700; color:var(--ink)}
+  .attr-gh .gsub{font-family:var(--mono); font-size:11px; color:var(--indigo); font-weight:600}
+  .attr-gh .gline{flex:1; height:1px; background:var(--line)}
+  .arow{display:grid; grid-template-columns:96px 1fr 60px; align-items:center; gap:10px; height:20px}
+  .arow .aname{font-size:11.5px; color:var(--ink-2); text-align:right; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .abar{position:relative; height:9px; background:#f0f0f3; border-radius:5px; overflow:hidden}
+  .abar span{position:absolute; left:0; top:0; bottom:0; border-radius:5px;
+    background:linear-gradient(90deg,var(--indigo),#7b7be6)}
+  .abar.zero span{background:#d6d6dc}
+  .arow .aval{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:11.5px; text-align:right; color:var(--ink)}
+  .arow .aval.z{color:var(--muted)}
+  .arow.overlay .abar span{background:linear-gradient(90deg,var(--up),#f0787c)}
+  .arow.overlay .aval{color:var(--up); font-weight:600}
+  /* feat grid */
+  .feat{display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:8px; overflow:hidden}
+  .feat .kv{background:#fff; padding:7px 10px; display:flex; flex-direction:column; gap:2px}
+  .feat .kv .k{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em}
+  .feat .kv .v{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:12.5px; color:var(--ink); font-weight:600}
+  .feat .kv .v.pos{color:var(--up)} .feat .kv .v.neg{color:var(--down)}
+  .feat .kv .v small{color:var(--muted); font-weight:400; font-family:var(--sans); font-size:11px}
+  /* T+N review row */
+  .tn-wrap{display:flex; align-items:center; gap:22px; flex-wrap:wrap}
+  .tn-cells{display:flex; gap:10px}
+  .tn{width:96px; border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:#fff}
+  .tn .lab{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em}
+  .tn .val{font-family:var(--mono); font-size:20px; color:#c4c4ca; font-weight:600; line-height:1.2}
+  .tn-note{color:var(--ink-2); font-size:12px; max-width:360px}
+  .tn-note b{color:var(--ink)}
+  /* ---------- status bar ---------- */
+  .statusbar{margin:16px 20px 22px; display:grid; grid-template-columns:1fr 1.35fr; gap:14px}
+  .sb-card{background:var(--surface); border:1px solid var(--line-strong); border-radius:10px; padding:12px 14px}
+  .sb-title{font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; display:flex; gap:8px; align-items:center}
+  .heat-strip{display:flex; gap:8px; flex-wrap:wrap}
+  .heat{display:inline-flex; align-items:center; gap:7px; height:26px; padding:0 10px; border-radius:7px; background:#fafafb; border:1px solid var(--line)}
+  .heat .hn{font-weight:600; font-size:12px}
+  .heat .hv{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink-2); font-size:12px}
+  .heat .hr{font-family:var(--mono); font-size:10.5px; color:#fff; background:var(--muted); border-radius:4px; padding:1px 5px}
+  .heat.top .hr{background:var(--indigo)}
+  .heat.top{border-color:var(--indigo); background:var(--indigo-tint)}
+  /* perf table */
+  .perf{width:100%; border-collapse:separate; border-spacing:0}
+  .perf th,.perf td{padding:6px 8px; font-size:12px; text-align:right; border-bottom:1px solid var(--line)}
+  .perf th{color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; font-weight:600}
+  .perf th:first-child,.perf td:first-child{text-align:left; color:var(--ink-2)}
+  .perf td.e{font-family:var(--mono); color:#c4c4ca; font-weight:600}
+  .perf tr:last-child td{border-bottom:0}
+  .cap{margin-top:9px; font-size:11.5px; color:var(--ink-2); display:flex; align-items:center; gap:7px}
+  .cap .dot{width:6px;height:6px;border-radius:50%;background:var(--muted)}
+  .sample-note{margin:2px 20px 0; font-size:11.5px; color:var(--ink-2)}
+  .sample-note b{color:var(--ink)}
+  /* style badge */
+  .stylebadge{
+    position:fixed; right:12px; bottom:12px; z-index:100;
+    font-family:var(--mono); font-size:11px; color:#fff;
+    background:#1a1a1e; border:1px solid #000; border-radius:7px;
+    padding:5px 9px; letter-spacing:.02em; box-shadow:0 6px 18px -8px rgba(0,0,0,.5);
+    opacity:.92;
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none !important}
+  }
+</style>
+</head>
+<body>
+<header class="chrome" aria-label="全局导航栏">
+  <nav class="crumb" aria-label="面包屑">
+    <span>量化工作台</span><span class="sep">/</span>
+    <span>选股台</span><span class="sep">/</span><b>台账</b>
+  </nav>
+  <span class="chip"><span class="k">策略</span><span class="v">strong_mainup</span></span>
+  <span class="chip"><span class="k">交易日</span><span class="v">2026-07-30</span></span>
+  <span class="chip"><span class="k">数据源</span><span class="v">Tushare</span></span>
+  <span class="spacer"></span>
+  <span class="badge-research" aria-label="研究观察池，非交易信号">
+    <span class="dot" aria-hidden="true"></span>研究观察池 · 非交易信号
+  </span>
+</header>
+
+<div class="toolbar" role="toolbar" aria-label="视图与筛选">
+  <div class="seg" role="group" aria-label="视图切换">
+    <button aria-pressed="true">今日名单</button>
+    <button aria-pressed="false">历史台账</button>
+    <button aria-pressed="false">复盘</button>
+  </div>
+  <span class="fchip">门槛通过<span class="x" aria-hidden="true">×</span></span>
+  <span class="fchip">主板<span class="x" aria-hidden="true">×</span></span>
+  <span class="fchip">单价&lt;70<span class="x" aria-hidden="true">×</span></span>
+  <span class="fchip">非ST<span class="x" aria-hidden="true">×</span></span>
+  <span class="spacer"></span>
+  <div class="readout">
+    <span class="flow">候选池 <b>260</b> → 结构化 <b>5</b> → 入选 <b>1</b></span>
+    <span class="cnt">列 <b>20</b></span>
+    <span class="cnt">行 <b>6</b></span>
+  </div>
+</div>
+
+<p class="sample-note">样张数据：<b>第 1 行为真实台账记录</b>，其余为结构示例（可插拔的候选结构，用于演示表格密度与列语义）。</p>
+
+<main aria-label="选股台账表格">
+  <div class="table-wrap" tabindex="0" aria-label="台账表格，可横向滚动">
+  <table>
+    <colgroup>
+      <col style="width:58px"><col style="width:104px"><col style="width:92px"><col style="width:84px">
+      <col style="width:72px"><col style="width:86px"><col style="width:100px"><col style="width:112px">
+      <col style="width:70px"><col style="width:70px"><col style="width:70px"><col style="width:64px">
+      <col style="width:156px"><col style="width:320px">
+    </colgroup>
+    <thead>
+      <tr>
+        <th scope="col" class="stick c-rank n"><span class="h"><span class="glyph">#</span>排名</span></th>
+        <th scope="col" class="stick c-code"><span class="h"><span class="glyph">A</span>代码
+          <svg class="chev" width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4 L5 1.5 L8 4 M2 6 L5 8.5 L8 6" fill="none" stroke="#b8b8c0" stroke-width="1.2" stroke-linecap="round"/></svg></span></th>
+        <th scope="col"><span class="h"><span class="glyph">A</span>名称</span></th>
+        <th scope="col"><span class="h"><span class="glyph">A</span>行业</span></th>
+        <th scope="col" class="n"><span class="h"><span class="glyph">#</span>收盘</span></th>
+        <th scope="col" class="n"><span class="h"><span class="glyph">#</span>涨跌幅</span></th>
+        <th scope="col"><span class="h"><span class="glyph">~</span>20日走势</span></th>
+        <th scope="col" class="n"><span class="h"><span class="glyph">#</span>综合分
+          <svg class="chev" width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 3.5 L5 6.5 L7.5 3.5 Z" fill="#5b5bd6"/></svg></span></th>
+        <th scope="col" class="n"><span class="h"><span class="glyph">#</span>MACD</span></th>
+        <th scope="col" class="n"><span class="h"><span class="glyph">#</span>周线</span></th>
+        <th scope="col" class="n"><span class="h"><span class="glyph">#</span>均线</span></th>
+        <th scope="col" class="n"><span class="h"><span class="glyph">#</span>量能</span></th>
+        <th scope="col"><span class="h"><span class="glyph">A</span>资金分层</span></th>
+        <th scope="col"><span class="h"><span class="glyph">A</span>一句话归因</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="data sel" tabindex="0" aria-selected="true">
+        <td class="stick c-rank"><div class="rankcell">
+          <span class="disc">
+            <input type="checkbox" id="exp1" checked aria-expanded="true" aria-controls="panel1" aria-label="展开 金种子酒 明细">
+            <svg class="tri" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 L7.5 5 L3 8.5 Z" fill="currentColor"/></svg>
+          </span>
+          <span class="rank-n">1</span>
+        </div></td>
+        <td class="stick c-code"><span class="code">600199.SH</span></td>
+        <td><span class="name">金种子酒</span></td>
+        <td class="ind">白酒</td>
+        <td class="num">8.08</td>
+        <td class="num up">+7.45%</td>
+        <td>
+          <svg class="spark" width="88" height="24" viewBox="0 0 88 24" aria-label="20日走势，整体上行" role="img">
+            <polyline fill="none" stroke="#e5484d" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
+              points="1,19 6,20 11,17 17,18 23,15 29,16 34,13 40,14 46,11 52,12 58,9 63,10 69,7 75,6 81,4 87,2"/>
+            <circle cx="87" cy="2" r="1.8" fill="#e5484d"/>
+          </svg>
+        </td>
+        <td class="num"><div class="scorecell"><span class="scorebar" style="width:73.5%"></span><span class="scoreval">0.7354</span></div></td>
+        <td class="num"><span class="pips" role="img" aria-label="MACD 4 of 4"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><span class="lab">4/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="周线 3 of 4"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="均线 4 of 4"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><span class="lab">4/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="量能 4 of 4"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><span class="lab">4</span></span></td>
+        <td><span class="mchip m-bigdiv"><span class="d" aria-hidden="true"></span>大资金承接型强分歧</span></td>
+        <td><span class="attr-note">结构<em>(0.18)</em>＋题材<em>(0.17)</em>领先，资金:大资金承接型强分歧(＋0.04)</span></td>
+      </tr>
+      <tr class="exp-row" data-for="exp1">
+        <td colspan="14">
+          <div class="panel" id="panel1" role="region" aria-label="金种子酒 台账明细">
+            <section class="col" aria-label="因子归因">
+              <h3 class="p-title">因子归因 · 分项贡献
+                <span class="tot">0.7354 <small>综合分</small></span>
+              </h3>
+
+              <div class="attr-group">
+                <div class="attr-gh"><span class="gname">结构</span><span class="gsub">0.1772</span><span class="gline"></span></div>
+                <div class="arow"><span class="aname">ma_stack</span><div class="abar"><span style="width:46.5%"></span></div><span class="aval">0.0512</span></div>
+                <div class="arow"><span class="aname">pos60</span><div class="abar"><span style="width:44.4%"></span></div><span class="aval">0.0488</span></div>
+                <div class="arow"><span class="aname">breakout</span><div class="abar"><span style="width:42.8%"></span></div><span class="aval">0.0471</span></div>
+                <div class="arow"><span class="aname">trend_combo</span><div class="abar"><span style="width:27.4%"></span></div><span class="aval">0.0301</span></div>
+              </div>
+
+              <div class="attr-group">
+                <div class="attr-gh"><span class="gname">题材</span><span class="gsub">0.1700</span><span class="gline"></span></div>
+                <div class="arow"><span class="aname">industry_heat</span><div class="abar"><span style="width:97.5%"></span></div><span class="aval">0.1073</span></div>
+                <div class="arow"><span class="aname">industry_lead</span><div class="abar"><span style="width:57.0%"></span></div><span class="aval">0.0627</span></div>
+                <div class="arow"><span class="aname">amount_top15pct</span><div class="abar zero"><span style="width:2%"></span></div><span class="aval z">0.0000</span></div>
+              </div>
+
+              <div class="attr-group">
+                <div class="attr-gh"><span class="gname">MACD</span><span class="gsub">0.1225</span><span class="gline"></span></div>
+                <div class="arow"><span class="aname">macd_bull</span><div class="abar"><span style="width:63.6%"></span></div><span class="aval">0.0700</span></div>
+                <div class="arow"><span class="aname">weekly_bull</span><div class="abar"><span style="width:47.7%"></span></div><span class="aval">0.0525</span></div>
+              </div>
+
+              <div class="attr-group">
+                <div class="attr-gh"><span class="gname">量能</span><span class="gsub">0.1170</span><span class="gline"></span></div>
+                <div class="arow"><span class="aname">vol_health</span><div class="abar"><span style="width:72.7%"></span></div><span class="aval">0.0800</span></div>
+                <div class="arow"><span class="aname">amt5_20</span><div class="abar"><span style="width:33.6%"></span></div><span class="aval">0.0370</span></div>
+              </div>
+
+              <div class="attr-group">
+                <div class="attr-gh"><span class="gname">动量</span><span class="gsub">0.1088</span><span class="gline"></span></div>
+                <div class="arow"><span class="aname">ret20</span><div class="abar"><span style="width:50.9%"></span></div><span class="aval">0.0560</span></div>
+                <div class="arow"><span class="aname">ret60</span><div class="abar"><span style="width:46.5%"></span></div><span class="aval">0.0512</span></div>
+                <div class="arow"><span class="aname">pct_chg</span><div class="abar"><span style="width:1.5%"></span></div><span class="aval">0.0016</span></div>
+              </div>
+
+              <div class="attr-group" style="margin-bottom:0">
+                <div class="attr-gh"><span class="gname">资金</span><span class="gsub">＋0.0400</span><span class="gline"></span></div>
+                <div class="arow overlay"><span class="aname">overlay 叠加</span><div class="abar"><span style="width:36.4%"></span></div><span class="aval">＋0.04</span></div>
+              </div>
+            </section>
+            <section class="col" aria-label="原始特征">
+              <h3 class="p-title">原始特征 feat<span class="tot" style="font-weight:400"><small>21 项</small></span></h3>
+              <div class="feat">
+                <div class="kv"><span class="k">last_close</span><span class="v">8.08</span></div>
+                <div class="kv"><span class="k">ret20</span><span class="v pos">+24.31%</span></div>
+                <div class="kv"><span class="k">ret60</span><span class="v pos">+2.02%</span></div>
+                <div class="kv"><span class="k">pos60</span><span class="v">0.612</span></div>
+                <div class="kv"><span class="k">new20</span><span class="v">是</span></div>
+                <div class="kv"><span class="k">new60</span><span class="v">否</span></div>
+                <div class="kv"><span class="k">ma_stack</span><span class="v">4/4</span></div>
+                <div class="kv"><span class="k">macd_dif</span><span class="v">0.1722</span></div>
+                <div class="kv"><span class="k">macd_dea</span><span class="v">0.0243</span></div>
+                <div class="kv"><span class="k">macd_hist</span><span class="v">0.2959</span></div>
+                <div class="kv"><span class="k">macd_bull</span><span class="v">4/4</span></div>
+                <div class="kv"><span class="k">weekly_bull</span><span class="v">3/4</span></div>
+                <div class="kv"><span class="k">vol5_20</span><span class="v">1.427</span></div>
+                <div class="kv"><span class="k">vol20_60</span><span class="v">1.322</span></div>
+                <div class="kv"><span class="k">amt5_20</span><span class="v">1.516</span></div>
+                <div class="kv"><span class="k">vol_health</span><span class="v">4</span></div>
+                <div class="kv"><span class="k">net5</span><span class="v neg">-8494.25万</span></div>
+                <div class="kv"><span class="k">big5</span><span class="v pos">+3440.55万</span></div>
+                <div class="kv"><span class="k">big_pos_days</span><span class="v">3/5</span></div>
+                <div class="kv"><span class="k">行业热度</span><span class="v">13.22 <small>#1</small></span></div>
+                <div class="kv"><span class="k">amount</span><span class="v">67.18亿</span></div>
+              </div>
+            </section>
+
+            <section class="col full" aria-label="T+N 复盘">
+              <h3 class="p-title">T+N 复盘 · 前视纪律</h3>
+              <div class="tn-wrap">
+                <div class="tn-cells">
+                  <div class="tn"><div class="lab">T+1</div><div class="val">—</div></div>
+                  <div class="tn"><div class="lab">T+3</div><div class="val">—</div></div>
+                  <div class="tn"><div class="lab">T+5</div><div class="val">—</div></div>
+                  <div class="tn"><div class="lab">T+10</div><div class="val">—</div></div>
+                </div>
+                <p class="tn-note"><b>未来第 N 日尚未到达</b>，按前视纪律保持空值——不回填、不预测，待自然交易日推进后由收盘价结算。</p>
+              </div>
+            </section>
+          </div>
+        </td>
+      </tr>
+      <tr class="data" tabindex="0" aria-selected="false">
+        <td class="stick c-rank"><div class="rankcell">
+          <span class="disc"><input type="checkbox" id="exp2" aria-expanded="false" aria-label="展开 欧菲光 明细">
+            <svg class="tri" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 L7.5 5 L3 8.5 Z" fill="currentColor"/></svg></span>
+          <span class="rank-n">2</span></div></td>
+        <td class="stick c-code"><span class="code">002456.SZ</span></td>
+        <td><span class="name">欧菲光</span></td><td class="ind">电子元件</td>
+        <td class="num">14.32</td><td class="num up">+5.21%</td>
+        <td><svg class="spark" width="88" height="24" viewBox="0 0 88 24" role="img" aria-label="20日走势 上行"><polyline fill="none" stroke="#e5484d" stroke-width="1.5" stroke-linejoin="round" points="1,20 8,18 15,19 22,15 29,16 36,14 43,12 50,13 57,10 64,9 71,7 78,8 87,4"/></svg></td>
+        <td class="num"><div class="scorecell"><span class="scorebar" style="width:71.0%"></span><span class="scoreval">0.7102</span></div></td>
+        <td class="num"><span class="pips" role="img" aria-label="MACD 3/4"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="周线 2/4"><i class="on"></i><i class="on"></i><i></i><i></i><span class="lab">2/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="均线 4/4"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><span class="lab">4/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="量能 3"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3</span></span></td>
+        <td><span class="mchip m-agree"><span class="d" aria-hidden="true"></span>资金一致确认</span></td>
+        <td><span class="attr-note">题材<em>(0.19)</em>驱动，电子元件板块领涨，量价健康</span></td>
+      </tr>
+      <tr class="data" tabindex="0" aria-selected="false">
+        <td class="stick c-rank"><div class="rankcell">
+          <span class="disc"><input type="checkbox" id="exp3" aria-expanded="false" aria-label="展开 中信证券 明细">
+            <svg class="tri" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 L7.5 5 L3 8.5 Z" fill="currentColor"/></svg></span>
+          <span class="rank-n">3</span></div></td>
+        <td class="stick c-code"><span class="code">600030.SH</span></td>
+        <td><span class="name">中信证券</span></td><td class="ind">证券</td>
+        <td class="num">27.65</td><td class="num up">+3.08%</td>
+        <td><svg class="spark" width="88" height="24" viewBox="0 0 88 24" role="img" aria-label="20日走势 震荡上行"><polyline fill="none" stroke="#e5484d" stroke-width="1.5" stroke-linejoin="round" points="1,16 8,17 15,14 22,16 29,13 36,15 43,12 50,14 57,11 64,13 71,10 78,11 87,8"/></svg></td>
+        <td class="num"><div class="scorecell"><span class="scorebar" style="width:66.9%"></span><span class="scoreval">0.6688</span></div></td>
+        <td class="num"><span class="pips" role="img" aria-label="MACD 4/4"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><span class="lab">4/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="周线 3/4"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="均线 3/4"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="量能 3"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3</span></span></td>
+        <td><span class="mchip m-nocont"><span class="d" aria-hidden="true"></span>总资金认可但大单不连续</span></td>
+        <td><span class="attr-note">动量<em>(0.15)</em>＋结构稳健，大单承接不连续需观察</span></td>
+      </tr>
+      <tr class="data" tabindex="0" aria-selected="false">
+        <td class="stick c-rank"><div class="rankcell">
+          <span class="disc"><input type="checkbox" id="exp4" aria-expanded="false" aria-label="展开 新和成 明细">
+            <svg class="tri" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 L7.5 5 L3 8.5 Z" fill="currentColor"/></svg></span>
+          <span class="rank-n">4</span></div></td>
+        <td class="stick c-code"><span class="code">002001.SZ</span></td>
+        <td><span class="name">新和成</span></td><td class="ind">化学制品</td>
+        <td class="num">22.41</td><td class="num up">+1.87%</td>
+        <td><svg class="spark" width="88" height="24" viewBox="0 0 88 24" role="img" aria-label="20日走势 横盘"><polyline fill="none" stroke="#8b8b93" stroke-width="1.5" stroke-linejoin="round" points="1,13 8,12 15,14 22,12 29,13 36,12 43,14 50,13 57,12 64,14 71,12 78,13 87,12"/></svg></td>
+        <td class="num"><div class="scorecell"><span class="scorebar" style="width:63.2%"></span><span class="scoreval">0.6321</span></div></td>
+        <td class="num"><span class="pips" role="img" aria-label="MACD 2/4"><i class="on"></i><i class="on"></i><i></i><i></i><span class="lab">2/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="周线 2/4"><i class="on"></i><i class="on"></i><i></i><i></i><span class="lab">2/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="均线 3/4"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="量能 2"><i class="on"></i><i class="on"></i><i></i><i></i><span class="lab">2</span></span></td>
+        <td><span class="mchip m-degrade"><span class="d" aria-hidden="true"></span>资金同步分歧，降级</span></td>
+        <td><span class="attr-note">结构<em>(0.13)</em>尚可但动能转弱，资金分歧降级处理</span></td>
+      </tr>
+      <tr class="data" tabindex="0" aria-selected="false">
+        <td class="stick c-rank"><div class="rankcell">
+          <span class="disc"><input type="checkbox" id="exp5" aria-expanded="false" aria-label="展开 三一重工 明细">
+            <svg class="tri" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 L7.5 5 L3 8.5 Z" fill="currentColor"/></svg></span>
+          <span class="rank-n">5</span></div></td>
+        <td class="stick c-code"><span class="code">600031.SH</span></td>
+        <td><span class="name">三一重工</span></td><td class="ind">工程机械</td>
+        <td class="num">18.90</td><td class="num down">-0.63%</td>
+        <td><svg class="spark" width="88" height="24" viewBox="0 0 88 24" role="img" aria-label="20日走势 回落"><polyline fill="none" stroke="#30a46c" stroke-width="1.5" stroke-linejoin="round" points="1,8 8,9 15,7 22,10 29,9 36,12 43,11 50,13 57,12 64,15 71,14 78,16 87,17"/></svg></td>
+        <td class="num"><div class="scorecell"><span class="scorebar" style="width:60.5%"></span><span class="scoreval">0.6045</span></div></td>
+        <td class="num"><span class="pips" role="img" aria-label="MACD 3/4"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="周线 1/4"><i class="on"></i><i></i><i></i><i></i><span class="lab">1/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="均线 2/4"><i class="on"></i><i class="on"></i><i></i><i></i><span class="lab">2/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="量能 2"><i class="on"></i><i class="on"></i><i></i><i></i><span class="lab">2</span></span></td>
+        <td><span class="mchip m-unconf"><span class="d" aria-hidden="true"></span>资金未充分确认</span></td>
+        <td><span class="attr-note">周线结构偏弱，日内回落，资金未充分确认</span></td>
+      </tr>
+      <tr class="data" tabindex="0" aria-selected="false">
+        <td class="stick c-rank"><div class="rankcell">
+          <span class="disc"><input type="checkbox" id="exp6" aria-expanded="false" aria-label="展开 泸州老窖 明细">
+            <svg class="tri" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 L7.5 5 L3 8.5 Z" fill="currentColor"/></svg></span>
+          <span class="rank-n">6</span></div></td>
+        <td class="stick c-code"><span class="code">000568.SZ</span></td>
+        <td><span class="name">泸州老窖</span></td><td class="ind">白酒</td>
+        <td class="num">128.50</td><td class="num down">-1.24%</td>
+        <td><svg class="spark" width="88" height="24" viewBox="0 0 88 24" role="img" aria-label="20日走势 回落"><polyline fill="none" stroke="#30a46c" stroke-width="1.5" stroke-linejoin="round" points="1,7 8,8 15,10 22,9 29,11 36,10 43,12 50,11 57,13 64,12 71,14 78,13 87,15"/></svg></td>
+        <td class="num"><div class="scorecell"><span class="scorebar" style="width:58.2%"></span><span class="scoreval">0.5820</span></div></td>
+        <td class="num"><span class="pips" role="img" aria-label="MACD 2/4"><i class="on"></i><i class="on"></i><i></i><i></i><span class="lab">2/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="周线 2/4"><i class="on"></i><i class="on"></i><i></i><i></i><span class="lab">2/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="均线 3/4"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3/4</span></span></td>
+        <td class="num"><span class="pips" role="img" aria-label="量能 3"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><span class="lab">3</span></span></td>
+        <td><span class="mchip m-nocont"><span class="d" aria-hidden="true"></span>总资金认可但大单不连续</span></td>
+        <td><span class="attr-note">同板块龙头联动，估值高位，大单承接断续</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</main>
+<section class="statusbar" aria-label="底部状态栏">
+  <div class="sb-card" aria-label="行业热度">
+    <h3 class="sb-title">行业热度 · 板块强弱</h3>
+    <div class="heat-strip">
+      <span class="heat top"><span class="hn">白酒</span><span class="hv">13.22</span><span class="hr">#1</span></span>
+      <span class="heat"><span class="hn">电子元件</span><span class="hv">11.80</span><span class="hr">#2</span></span>
+      <span class="heat"><span class="hn">证券</span><span class="hv">9.41</span><span class="hr">#5</span></span>
+      <span class="heat"><span class="hn">化学制品</span><span class="hv">7.06</span><span class="hr">#9</span></span>
+      <span class="heat"><span class="hn">工程机械</span><span class="hv">5.63</span><span class="hr">#14</span></span>
+    </div>
+    <p class="cap"><span class="dot" aria-hidden="true"></span>热度为板块相对强度分位，白酒居首并领先入选标的所在行业。</p>
+  </div>
+
+  <div class="sb-card" aria-label="复盘绩效">
+    <h3 class="sb-title">复盘绩效 · 前视留白</h3>
+    <table class="perf">
+      <thead><tr><th scope="col">窗口</th><th scope="col">样本数</th><th scope="col">RankIC</th><th scope="col">胜率</th><th scope="col">盈亏比</th></tr></thead>
+      <tbody>
+        <tr><td>T+1</td><td class="e">—</td><td class="e">—</td><td class="e">—</td><td class="e">—</td></tr>
+        <tr><td>T+3</td><td class="e">—</td><td class="e">—</td><td class="e">—</td><td class="e">—</td></tr>
+        <tr><td>T+5</td><td class="e">—</td><td class="e">—</td><td class="e">—</td><td class="e">—</td></tr>
+        <tr><td>T+10</td><td class="e">—</td><td class="e">—</td><td class="e">—</td><td class="e">—</td></tr>
+      </tbody>
+    </table>
+    <p class="cap"><span class="dot" aria-hidden="true"></span>样本积累中：首条台账 2026-07-30。绩效待自然交易日推进后逐窗口结算，空值为纪律而非缺陷。</p>
+  </div>
+</section>
+
+<div class="stylebadge" aria-hidden="true">样张 04 · 数据编辑器风</div>
+</body>
+</html>

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>因子实验室 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div><div class="eyebrow">Factor trace</div><h1>因子实验室</h1><p>查看候选池因子覆盖率和单只股票的实际贡献。没有训练完成的模型，不展示预测概率。</p></div>
+        <button id="refresh" class="button">刷新</button>
+      </header>
+
+      <section class="grid grid-3">
+        <article class="panel span-2">
+          <div class="panel-header"><div><h2>因子覆盖</h2><p>最新候选池统计</p></div></div>
+          <div class="table-wrap"><table><thead><tr><th>因子</th><th>覆盖率</th><th>平均贡献</th></tr></thead><tbody id="factor-coverage"></tbody></table></div>
+        </article>
+        <article class="panel raised">
+          <div class="panel-header"><div><h2>机器学习复核</h2><p>只显示真实训练状态</p></div><div id="ml-state"></div></div>
+          <p id="ml-reason" class="muted"></p>
+          <div class="section-label">启用门槛</div>
+          <div id="ml-gate" class="gate-list"></div>
+        </article>
+      </section>
+
+      <section class="panel" id="ml-diagnostics" hidden style="margin-top:16px">
+        <div class="panel-header">
+          <div><h2>模型体检</h2><p>样本外指标由产物自带。未达门槛也照样展示——要看清差在哪，而不是只看到"不可用"</p></div>
+          <div id="ml-meta" class="header-meta"></div>
+        </div>
+        <div class="grid grid-4" id="ml-metrics"></div>
+        <div class="detail-grid" style="margin-top:18px">
+          <div>
+            <div class="section-label">逐日样本外 IC<span id="ml-ic-hint" class="muted"></span></div>
+            <div id="ml-ic-chart" class="sparkline tall"></div>
+          </div>
+          <div>
+            <div class="section-label">分桶平均收益（1=打分最高）</div>
+            <div id="ml-buckets" class="stack"><div class="empty-state">无分桶数据</div></div>
+          </div>
+        </div>
+        <div class="section-label" style="margin-top:18px">分折明细（purged walk-forward）</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>折</th><th>训练区间</th><th>隔离</th><th>测试区间</th><th>样本</th><th>IC</th><th>AUC</th><th>命中率</th></tr></thead>
+            <tbody id="ml-folds"></tbody>
+          </table>
+        </div>
+        <p id="ml-provenance" class="muted" style="margin:12px 0 0; font-size:11px"></p>
+      </section>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-header"><div><h2>单股贡献</h2><p>选择最终入选股票</p></div><select id="stock-select" class="field"></select></div>
+        <div id="factor-detail" class="stack"><div class="empty-state">等待股票数据</div></div>
+      </section>
+    </main>
+  </div>
+  <script src="/assets/vendor/echarts.min.js"></script>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/factorlab.js"></script>
+</body>
+</html>

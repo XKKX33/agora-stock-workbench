@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 复盘 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+  <style>
+    .ai-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; align-items: start; }
+    .ai-side { position: sticky; top: 20px; }
+    .ai-main { min-width: 0; display: grid; gap: 16px; }
+    .legend-bar { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 18px; }
+    .legend-item { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-muted); }
+    .guide-card { margin-top: 4px; border: 1px solid #695630; border-radius: var(--radius); background: #171207; padding: 14px; }
+    .guide-card strong { display: block; margin-bottom: 6px; }
+    .guide-card p { margin: 0 0 8px; color: var(--text-muted); font-size: 12px; }
+    .guide-card ol { margin: 0; padding-left: 18px; color: var(--text-muted); font-size: 12px; }
+    .guide-card code { font-family: var(--font-mono); color: #d4b46d; }
+    .review-meta-bar { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+    .review-meta-bar strong { font: 600 15px var(--font-display); }
+    .review-meta-bar .mono { color: var(--text-muted); font-size: 11px; }
+    .section-note { margin: 12px 0 0; color: #718096; font-size: 11px; }
+    .kv-block { padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+    .kv-block:last-child { border-bottom: 0; }
+    .kv-block > .kv-key { display: block; color: var(--text-muted); font-size: 11px; margin-bottom: 6px; }
+    .kv-block .kv { border-bottom: 0; padding: 4px 0; }
+    .kv-block .table-wrap { margin-top: 4px; }
+    .narrative-text { white-space: pre-wrap; font-size: 13px; line-height: 1.8; }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .missing-stack { display: grid; gap: 8px; justify-items: center; }
+    .missing-stack .detail { color: var(--text-muted); font-size: 12px; }
+    @media (max-width: 1060px) {
+      .ai-layout { grid-template-columns: 1fr; }
+      .ai-side { position: static; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div>
+          <div class="eyebrow">Post-close narrative</div>
+          <h1>AI 复盘</h1>
+          <p>AI 只基于数据库已入库事实生成盘后复盘叙述；未配置时如实显示缺什么，绝不编造内容。</p>
+        </div>
+        <div class="button-row">
+          <span id="generate-state" class="muted"></span>
+          <button id="generate-btn" class="button primary">生成 AI 复盘</button>
+        </div>
+      </header>
+
+      <div class="legend-bar" id="legend-bar" hidden></div>
+
+      <div class="ai-layout">
+        <aside class="ai-side">
+          <article class="panel raised">
+            <div class="panel-header"><div><h2>AI 状态</h2><p>配置与可用性</p></div><div id="ai-state-tag"></div></div>
+            <div id="ai-state-body" class="stack"><div class="empty-state">加载中…</div></div>
+          </article>
+        </aside>
+        <div class="ai-main">
+          <div class="review-meta-bar">
+            <strong id="review-title">盘后复盘</strong>
+            <div class="mono" id="review-meta">—</div>
+          </div>
+          <div id="review-sections" class="stack"><div class="empty-state">加载中…</div></div>
+          <article class="panel raised" id="narrative-panel" hidden>
+            <div class="panel-header"><div><h2>AI 叙述</h2><p id="narrative-meta">—</p></div></div>
+            <div class="narrative-text" id="narrative-text"></div>
+            <div id="narrative-notes"></div>
+          </article>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/ai.js"></script>
+</body>
+</html>

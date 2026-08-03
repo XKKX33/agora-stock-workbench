@@ -1,0 +1,110 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自选股 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+  <style>
+    /* ---- 自选股页私有样式（科技感：深底 + 蓝紫光效 + 玻璃拟态，不改 theme.css） ---- */
+    body {
+      background-image:
+        radial-gradient(1100px 560px at 12% -12%, rgba(62, 198, 255, .10), transparent 60%),
+        radial-gradient(950px 540px at 92% -4%, rgba(139, 92, 246, .13), transparent 64%),
+        radial-gradient(1100px 760px at 50% 114%, rgba(124, 58, 237, .08), transparent 62%);
+      background-attachment: fixed;
+    }
+    .panel {
+      background: linear-gradient(180deg, rgba(21, 31, 47, .94), rgba(13, 20, 32, .97));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035), 0 22px 44px -30px rgba(0, 0, 0, .75);
+    }
+    .eyebrow { color: #a5b4fc; }
+    .page-header h1 { text-shadow: 0 0 30px rgba(124, 58, 237, .30), 0 0 14px rgba(62, 198, 255, .18); }
+
+    /* A股习惯：涨=红、跌=绿 */
+    .up { color: #e05a5a; }
+    .down { color: #3da678; }
+
+    /* 顶部工具条：搜索 + 行业筛选 + 添加 + 刷新 */
+    .watch-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .watch-toolbar .field-search { width: min(240px, 100%); }
+    .watch-toolbar .field { width: 160px; }
+    .watch-toolbar .field-add { width: 190px; }
+    .toolbar-spacer { flex: 1; }
+
+    /* 概览小卡 */
+    .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+    .stat-chip {
+      display: inline-flex; align-items: baseline; gap: 8px;
+      padding: 8px 14px; border-radius: var(--radius-pill);
+      border: 1px solid rgba(139, 92, 246, .28);
+      background: linear-gradient(135deg, rgba(62, 198, 255, .08), rgba(139, 92, 246, .12));
+      font-size: 12px; color: var(--text-muted);
+    }
+    .stat-chip b { font: 600 15px var(--font-mono); color: var(--text); font-variant-numeric: tabular-nums; }
+    .stat-chip .up { color: #e05a5a; }
+    .stat-chip .down { color: #3da678; }
+
+    .watch-row { cursor: pointer; }
+    .watch-row:hover td { background: linear-gradient(90deg, rgba(62, 198, 255, .06), rgba(139, 92, 246, .08)); }
+    .watch-remove {
+      min-height: 26px; padding: 0 10px; font-size: 12px;
+      color: var(--text-muted); border-color: rgba(148, 163, 184, .25);
+      background: transparent;
+    }
+    .watch-remove:hover { color: #efc2c7; border-color: rgba(200, 93, 103, .5); }
+    .watch-empty td { padding: 34px 12px; }
+    .guide { text-align: center; }
+    .guide .guide-icon { font-size: 26px; line-height: 1; margin-bottom: 8px; opacity: .9; }
+    .guide .guide-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .guide .guide-tip { font-size: 12px; color: var(--text-muted); line-height: 1.8; }
+    .guide .guide-actions { margin-top: 14px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+
+    @media (max-width: 1060px) {
+      .watch-toolbar .toolbar-spacer { display: none; }
+      .watch-toolbar .field-search, .watch-toolbar .field { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+
+      <header class="page-header">
+        <div>
+          <div class="eyebrow">Watchlist · Quotes</div>
+          <h1>自选股</h1>
+          <p>集中查看自选股行情：搜索、按行业筛选、一键添加或移除，点击行跳转 K 线。</p>
+        </div>
+        <div class="watch-toolbar">
+          <input id="watch-search" class="field field-search" placeholder="筛选代码或名称" autocomplete="off" aria-label="筛选自选股">
+          <select id="watch-industry" class="field" aria-label="按行业筛选"><option value="">全部行业</option></select>
+          <input id="watch-add-code" class="field field-add" placeholder="输入代码或名称添加自选" autocomplete="off" aria-label="添加自选股">
+          <button id="watch-add-btn" class="button primary" type="button">添加</button>
+          <button id="watch-refresh" class="button" type="button">刷新</button>
+        </div>
+      </header>
+
+      <div class="stats" id="watch-stats" aria-label="自选概览"></div>
+
+      <section class="panel" style="margin-top:16px" aria-label="自选股行情">
+        <div class="panel-header">
+          <div><h2>行情列表</h2><p>行情为各自最新交易日 · 点击行跳转 K 线</p></div>
+          <a class="button" href="p6_chart.html">去行情K线</a>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>代码</th><th>名称</th><th>行业</th><th>收盘</th><th>涨跌幅</th><th>最新交易日</th><th></th></tr></thead>
+            <tbody id="watch-rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/watchlist.js"></script>
+</body>
+</html>

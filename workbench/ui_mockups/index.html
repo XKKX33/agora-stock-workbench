@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>量化工作台 · UI 样张对比</title>
+<style>
+  :root{
+    --bg:#0b0c0f; --panel:#13151b; --line:rgba(255,255,255,.08);
+    --fg:#e8eaf0; --mut:#9aa3b5; --dim:#626c80;
+    --cyan:#22d3ee; --violet:#8b5cf6; --lime:#a3e635; --indigo:#7c7cf0;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,"DejaVu Sans Mono",monospace;
+    --sans:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);
+       min-height:100vh;
+       background-image:radial-gradient(900px 500px at 20% -10%,rgba(34,211,238,.07),transparent 60%),
+                        radial-gradient(700px 420px at 92% 8%,rgba(139,92,246,.07),transparent 60%);}
+  .wrap{max-width:1180px;margin:0 auto;padding:56px 32px 80px}
+  .kick{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--cyan);margin:0 0 14px}
+  h1{font-size:34px;line-height:1.15;letter-spacing:-.02em;margin:0 0 12px;font-weight:600}
+  .lede{color:var(--mut);font-size:14.5px;line-height:1.75;max-width:74ch;margin:0 0 8px}
+  .lede b{color:var(--fg);font-weight:600}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin:22px 0 40px}
+  .chip{font-family:var(--mono);font-size:11px;padding:5px 10px;border:1px solid var(--line);
+        border-radius:5px;color:var(--mut);background:rgba(255,255,255,.02)}
+  .chip.hi{color:var(--lime);border-color:rgba(163,230,53,.3);background:rgba(163,230,53,.06)}
+
+  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+  a.card{display:block;text-decoration:none;color:inherit;position:relative;
+         background:var(--panel);border:1px solid var(--line);border-radius:14px;
+         padding:26px 26px 22px;overflow:hidden;
+         transition:transform .2s ease-out,border-color .2s ease-out,box-shadow .2s ease-out}
+  a.card::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:var(--accent,var(--cyan));opacity:.7}
+  a.card:hover{transform:translateY(-2px);border-color:rgba(255,255,255,.18);
+               box-shadow:0 18px 44px -18px rgba(0,0,0,.75)}
+  a.card:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
+  .no{font-family:var(--mono);font-size:38px;line-height:1;color:var(--accent,var(--cyan));
+      opacity:.9;letter-spacing:-.03em}
+  .nm{font-size:19px;font-weight:600;margin:14px 0 6px;letter-spacing:-.01em}
+  .ref{font-family:var(--mono);font-size:11px;color:var(--dim);margin:0 0 14px}
+  .desc{font-size:13px;color:var(--mut);line-height:1.7;margin:0 0 18px}
+  ul.pts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+  ul.pts li{font-size:12.5px;color:var(--mut);padding-left:14px;position:relative}
+  ul.pts li::before{content:"";position:absolute;left:0;top:7px;width:5px;height:5px;border-radius:50%;
+                    background:var(--accent,var(--cyan));opacity:.55}
+  .open{margin-top:20px;font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;
+        text-transform:uppercase;color:var(--accent,var(--cyan))}
+
+  .c1{--accent:var(--cyan)} .c2{--accent:var(--violet)}
+  .c3{--accent:var(--indigo)} .c4{--accent:var(--lime)}
+
+  .foot{margin-top:44px;border-top:1px solid var(--line);padding-top:26px;
+        display:grid;grid-template-columns:1fr 1fr;gap:26px}
+  .foot h2{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+           color:var(--dim);margin:0 0 12px;font-weight:400}
+  .foot p{margin:0 0 9px;font-size:13px;color:var(--mut);line-height:1.7}
+  .foot code{font-family:var(--mono);font-size:12px;color:var(--fg);background:rgba(255,255,255,.05);
+             padding:1px 5px;border-radius:3px}
+  .warn{margin-top:34px;border:1px solid rgba(251,191,36,.26);background:rgba(251,191,36,.05);
+        border-radius:10px;padding:16px 18px;font-size:13px;color:#e8d9b0;line-height:1.7}
+  .warn b{color:#fbbf24}
+  @media (max-width:900px){.grid,.foot{grid-template-columns:1fr}}
+  @media (prefers-reduced-motion:reduce){a.card{transition:none}a.card:hover{transform:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="kick">Quant Workbench · UI Direction</p>
+    <h1>四套 UI 样张 · 横向对比</h1>
+    <p class="lede">同一份<b>真实数据</b>、同一套信息架构，四种视觉方向。请依次打开，挑出你想要的那一个 —— 选定后我用 <b>Streamlit</b> 复刻成真实工作台。</p>
+    <div class="meta">
+      <span class="chip">交易日 2026-07-30</span>
+      <span class="chip">策略 strong_mainup</span>
+      <span class="chip">600199.SH 金种子酒 · 综合分 0.7354</span>
+      <span class="chip">14 个因子真实 contrib</span>
+      <span class="chip hi">红涨绿跌</span>
+      <span class="chip hi">单文件 · 零外链 · 离线可开</span>
+    </div>
+  </header>
+
+  <main class="grid" aria-label="样张列表">
+    <a class="card c1" href="01_dark_terminal.html">
+      <div class="no">01</div>
+      <h2 class="nm">暗色终端风</h2>
+      <p class="ref">QuantDeck / Terminal Portfolio / Midnight Terminal</p>
+      <p class="desc">近黑底、发丝线分隔、等宽表格数字列列对齐，电光青只留给激活态。机构盯盘工位的感觉。</p>
+      <ul class="pts">
+        <li>信息密度最高，一屏看完名单＋归因＋复盘</li>
+        <li>34px 紧凑行高，11–13px 数据字号</li>
+        <li>最重要的那个数字才有发光</li>
+      </ul>
+      <p class="open">打开样张 →</p>
+    </a>
+
+    <a class="card c2" href="02_bento_grid.html">
+      <div class="no">02</div>
+      <h2 class="nm">Bento 网格风</h2>
+      <p class="ref">Bento Grid 配方 · 4 列 / 200px 行 / radius 24px</p>
+      <p class="desc">大小方块拼贴，尺寸本身编码优先级。只有一个 2×2 hero 格子作为视觉锚点。</p>
+      <ul class="pts">
+        <li>头号候选独占大格，综合分做巨型数字</li>
+        <li>格子与 widget 一一对应，扩展新面板最省事</li>
+        <li>静止无阴影，只在 hover 抬起</li>
+      </ul>
+      <p class="open">打开样张 →</p>
+    </a>
+
+    <a class="card c3" href="03_light_fintech.html">
+      <div class="no">03</div>
+      <h2 class="nm">亮色 Fintech 卡片风</h2>
+      <p class="ref">Linear / Stripe 克制路线</p>
+      <p class="desc">浅底白卡、1px 发丝边框、大留白，靛蓝单一强调色只用在语义处。白天看最不累。</p>
+      <ul class="pts">
+        <li>左侧六页导航（数据／因子／选股／回测／模型／绩效）</li>
+        <li>非均匀间距节奏，靠层叠而非重阴影做深度</li>
+        <li>x/4 类指标做成分段 pip，不写纯文字</li>
+      </ul>
+      <p class="open">打开样张 →</p>
+    </a>
+
+    <a class="card c4" href="04_data_editor.html">
+      <div class="no">04</div>
+      <h2 class="nm">数据编辑器风</h2>
+      <p class="ref">Notion / Retool · 表格是主角</p>
+      <p class="desc">承认这个系统的真实对象就是<b>台账</b>：每次选股是一行，随时间累积 T+N 收益。所以做成表格工具，不是卡片仪表盘。</p>
+      <ul class="pts">
+        <li>吸顶表头＋吸左排名/代码列，行内展开因子归因</li>
+        <li>单元格内嵌 sparkline／填充条／资金 chip／pip</li>
+        <li>零 JS 也能展开（纯 CSS 交互）</li>
+      </ul>
+      <p class="open">打开样张 →</p>
+    </a>
+  </main>
+
+  <div class="warn">
+    <b>关于样张里的数据：</b>第 1 行（600199.SH 金种子酒）是 <code>picks</code> 台账里的<b>真实记录</b> —— 收盘 8.08、涨跌幅 +7.45%、综合分 0.7354、14 个因子 contrib、net5 −8494.25 万 / big5 +3440.55 万，全部原样取自 DuckDB。其余各行是<b>结构示例</b>，只为撑满版面看布局，不代表任何选股结论。T+N 复盘一律留空 —— 首条台账 2026-07-30，未来第 N 日尚未到达，按前视纪律绝不反填。
+  </div>
+
+  <div class="foot">
+    <section>
+      <h2>怎么看</h2>
+      <p>四个文件都在同一目录，双击即可用浏览器打开，互相之间可以直接点返回。建议在 <code>1440px</code> 宽窗口下看。</p>
+      <p>每张右下角有 <code>样张 0N · 风格名</code> 的角标，方便你并排截图对比时认。</p>
+    </section>
+    <section>
+      <h2>挑完之后</h2>
+      <p>告诉我编号即可。也可以混搭 —— 比如「主体用 01 的暗色终端，但名单区照 04 的行内展开来做」。</p>
+      <p>定稿后我按选定方向搭 Streamlit 六页工作台：数据面板 / 因子实验室 / 选股台 / 回测台 / 模型台 / 绩效台。</p>
+    </section>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,125 @@
+# Quant Workbench — 全局配置
+# 路径均相对 workbench/ 根目录
+
+data:
+  db_path: data/market.duckdb          # DuckDB 单文件
+  parquet_dir: data/parquet            # 冷存
+  history_years: 5                     # 回补年限
+  min_daily_rows: 1000                 # 最新交易日确认阈值(rows>此值视为已收盘确认)
+
+tushare:
+  # token 优先读环境变量 TUSHARE_TOKEN;为空则回退 ts.pro_api() 落盘 token
+  token_env: TUSHARE_TOKEN
+  request_timeout_seconds: 120
+  retry: 3
+  sleep: 0.02
+
+realtime:
+  source: tencent                      # easyquotation tencent 主源
+  limit_up_pct: 9.5                    # 近涨停剔除阈值(实时)
+
+engine:
+  default_strategy: strong_mainup
+  candidate_limit: 260
+  history_bars: 150                    # 单票回看交易日数
+
+schedule:
+  # 收盘后自动任务链。enabled=false 时调度器仍会上报状态,只是不触发。
+  enabled: false
+  run_after: "15:30"                   # 当日达到此时刻后才允许为今天的交易日启动
+  exchange: SSE                        # 交易日历口径
+  strategy: strong_mainup              # 盘后扫描策略;留空则回退 engine.default_strategy
+  online: true                         # true=先联网更新行情;false=只用本地数据跑闭环
+  tick_seconds: 60                     # 调度轮询间隔(秒)
+
+ai:
+  # AI 盘后复盘叙述。本阶段只建立接口边界,不接入任何提供方。
+  # enabled=false 时 /api/ai 明确返回 availability=disabled;
+  # 开了但缺 provider/model/凭据则返回 unconfigured 并列出缺什么,
+  # 绝不返回编造的"AI 摘要"。
+  enabled: false
+  provider:                              # 须已在 engine/ai.NARRATOR_REGISTRY 注册
+  model:                                 # 留空表示未指定,不替用户挑默认模型
+  api_key_env: WORKBENCH_AI_API_KEY      # 凭据只从环境变量读,不写进本文件
+
+agent:
+  # 多 agent 短线研判。接入方式与 ai 段一致(provider/base_url/model/api_key_env),
+  # 也允许单独覆盖;留空字段回退到 ai 段。
+  enabled: false
+  provider: openai_compatible        # 目前唯一实现:OpenAI 兼容 /chat/completions
+  model:                             # 留空回退 ai.model
+  base_url:                          # 留空回退 ai.base_url(必填,不猜默认地址)
+  api_key_env: WORKBENCH_AI_API_KEY  # 留空回退 ai.api_key_env
+  temperature: 0.2                   # 研判偏好稳定输出,温度低
+  max_tokens: 4000                   # 单次回答上限
+  # 面板默认参数与硬上限:前端可改,后端按上限钳制,防止超长任务打爆模型
+  default_candidates: 200            # 粗筛候选数量(1~200)
+  default_depth: 8                   # 深度学习数量(1~30)
+  default_final: 3                   # 最终输出数量(1~10)
+  max_candidates: 200
+  max_depth: 30
+  max_final: 10
+
+news:
+  # 舆情采集。enabled=false 或 sources 为空时,盘后链条的采集步会明确报
+  # unavailable(未配置),而不是假装采到了 0 条正常新闻——两者含义完全不同。
+  enabled: true
+  close_cutoff: "15:00"                # 归属交易日的切分时点:此刻之后发布的归到下一开市日
+  half_life_days: 3.0                  # 时间衰减半衰期(自然日)
+  sources:
+    # TrendRadar 热榜采集(经 newsnow 公开聚合 API 抓全网热榜标题)。
+    # GPL-3.0 代码隔离在 vendor/TrendRadar/,只按单文件路径加载 DataFetcher,
+    # 详见 engine/news_trendradar.py。热榜条目无个股代码、无正文摘要、无权威
+    # 发布时间——个股关联交给下游 link_stocks,published_at 记为采集时刻并在
+    # raw.time_basis 标注,不冒充发布时间。
+    - source_id: trendradar
+      name: TrendRadar 全网热榜
+      kind: news
+      home_url: https://github.com/sansan0/TrendRadar
+      base_credibility:               # 热榜可信度未逐条评估,留空(页面显示"未评估")
+      compliance_note: "经 newsnow 公开聚合 API(https://newsnow.busiyi.world)获取全网热榜标题;热榜快照无权威发布时间,published_at 记为首次抓取时刻(raw.time_basis=first_seen_at_collect);GPL-3.0 源码隔离在 vendor/,仅按单文件加载 DataFetcher;核验于 2026-08-01"
+      enabled: true
+      fetcher: trendradar             # 已在 engine/news_config.FETCHER_REGISTRY 注册
+      options:
+        # api_url 留空用默认 newsnow;自建实例改这里即可,不动代码
+        api_url:
+        # proxy_url 留空不走代理
+        proxy_url:
+        # 请求间隔(毫秒),对聚合 API 友好一些
+        request_interval_ms: 1000
+        # 全部热榜源。expected_domain 供 vendor DataFetcher 做 HTTPS+域名安全校验,
+        # 只要 api_url 非自建实例就建议保留,防链接劫持/数据篡改。
+        platforms:
+          - id: toutiao
+            name: 今日头条
+            expected_domain: toutiao.com
+          - id: baidu
+            name: 百度热搜
+            expected_domain: baidu.com
+          - id: wallstreetcn-hot
+            name: 华尔街见闻
+            expected_domain: wallstreetcn.com
+          - id: thepaper
+            name: 澎湃新闻
+            expected_domain: thepaper.cn
+          - id: bilibili-hot-search
+            name: bilibili 热搜
+            expected_domain: bilibili.com
+          - id: cls-hot
+            name: 财联社热门
+            expected_domain: cls.cn
+          - id: ifeng
+            name: 凤凰网
+            expected_domain: ifeng.com
+          - id: tieba
+            name: 贴吧
+            expected_domain: baidu.com
+          - id: weibo
+            name: 微博
+            expected_domain: weibo.com
+          - id: douyin
+            name: 抖音
+            expected_domain: douyin.com
+          - id: zhihu
+            name: 知乎
+            expected_domain: zhihu.com

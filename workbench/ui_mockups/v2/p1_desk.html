@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>选股台 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+  <style>
+    /* ---- 选股台页私有样式（科技感：深底 + 青蓝紫光效 + 玻璃拟态，与行情/情绪页一致） ---- */
+    body {
+      background-image:
+        radial-gradient(1100px 560px at 12% -12%, rgba(62, 198, 255, .10), transparent 60%),
+        radial-gradient(950px 540px at 92% -4%, rgba(139, 92, 246, .13), transparent 64%),
+        radial-gradient(1100px 760px at 50% 114%, rgba(124, 58, 237, .08), transparent 62%);
+      background-attachment: fixed;
+    }
+    .panel {
+      background: linear-gradient(180deg, rgba(21, 31, 47, .94), rgba(13, 20, 32, .97));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035), 0 22px 44px -30px rgba(0, 0, 0, .75);
+    }
+    .eyebrow { color: #a5b4fc; }
+    .page-header h1 { text-shadow: 0 0 30px rgba(124, 58, 237, .30), 0 0 14px rgba(62, 198, 255, .18); }
+
+    /* A股习惯：涨=红、跌=绿 */
+    .up { color: #e05a5a; }
+    .down { color: #3da678; }
+
+    /* 主次两栏布局：左=选股工作流(候选→详情→行情)，右=关注与资金侧栏 */
+    .desk-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+      margin-top: 16px;
+    }
+    .col-stack { display: grid; gap: 16px; min-width: 0; }
+
+    /* 候选池：星标列 */
+    .star-btn {
+      min-height: 28px; width: 34px; padding: 0;
+      font-size: 14px; line-height: 1;
+      color: var(--text-muted); border-color: transparent; background: transparent;
+      cursor: pointer; border-radius: var(--radius-sm);
+    }
+    .star-btn:hover { color: #f5d76e; border-color: rgba(245, 215, 110, .4); background: rgba(245, 215, 110, .08); }
+    .star-btn.in-list { color: #f5c542; }
+    .star-btn.in-list:hover { color: #e05a5a; }
+
+    /* 自选股面板 */
+    .watch-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .watch-toolbar .field { width: 150px; }
+    .watch-remove {
+      min-height: 24px; padding: 0 8px; font-size: 11px;
+      color: var(--text-muted); border-color: rgba(148, 163, 184, .25); background: transparent;
+    }
+    .watch-remove:hover { color: #efc2c7; border-color: rgba(200, 93, 103, .5); }
+    .watch-row { cursor: pointer; }
+    .watch-row:hover td { background: rgba(139, 92, 246, .06); }
+    .watch-empty td { padding: 22px 12px; }
+
+    /* 行业资金流向 */
+    .mf-note { color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+    .mf-rows td { font-variant-numeric: tabular-nums; }
+
+
+    /* AI 研判面板 */
+    .agent-status { font-size: 12px; color: var(--text-muted); max-width: 340px; text-align: right; line-height: 1.6; }
+    .agent-config { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; }
+    .agent-field { display: grid; gap: 5px; font-size: 11px; color: var(--text-muted); }
+    .agent-field input { width: 96px; }
+    .agent-force { display: inline-flex; gap: 7px; align-items: center; font-size: 12px; color: var(--text-muted); padding-bottom: 9px; cursor: pointer; }
+    .agent-pool-note { color: var(--text-muted); font-size: 11px; margin-bottom: 10px; }
+    .agent-progress { margin: 12px 0; padding: 12px 14px; border: 1px solid rgba(139, 92, 246, .25); border-radius: var(--radius); background: rgba(13, 20, 32, .6); }
+    .progress-head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; margin-bottom: 8px; }
+    .progress-track { height: 8px; border-radius: var(--radius-pill); background: var(--navy); overflow: hidden; }
+    .progress-fill { height: 100%; width: 0; border-radius: var(--radius-pill); background: linear-gradient(90deg, #3ec6ff, #8b5cf6); box-shadow: 0 0 14px rgba(124, 58, 237, .55); transition: width .3s var(--ease); }
+    .agent-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-top: 12px; }
+    .agent-card { border: 1px solid rgba(139, 92, 246, .22); border-radius: var(--radius); padding: 14px; background: linear-gradient(160deg, rgba(62, 198, 255, .05), rgba(139, 92, 246, .09)); }
+    .agent-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .agent-card-head strong { font-size: 14px; }
+    .agent-card-head .mono { font-size: 11px; color: var(--text-muted); }
+    .agent-card-head .spacer { flex: 1; }
+    .verdict-bull { color: #e05a5a; border-color: rgba(224, 90, 90, .45); }
+    .verdict-bear { color: #3da678; border-color: rgba(61, 166, 120, .45); }
+    .verdict-flat { color: #c49a4a; border-color: rgba(196, 154, 74, .45); }
+    .agent-score-row { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; }
+    .agent-score-track { flex: 1; height: 6px; border-radius: var(--radius-pill); background: var(--navy); overflow: hidden; }
+    .agent-score-fill { height: 100%; border-radius: var(--radius-pill); background: linear-gradient(90deg, #3ec6ff, #8b5cf6); }
+    .agent-thesis { font-size: 12.5px; line-height: 1.7; margin: 8px 0; }
+    .agent-action { font-size: 12px; color: #a5b4fc; margin: 4px 0 8px; }
+    .agent-risks { margin: 6px 0 10px; padding: 0; list-style: none; display: grid; gap: 4px; }
+    .agent-risks li { font-size: 12px; color: var(--text-muted); line-height: 1.6; padding-left: 14px; position: relative; }
+    .agent-risks li::before { content: "!"; position: absolute; left: 0; top: 0; color: #c49a4a; font-weight: 700; }
+    .agent-card-foot { display: flex; gap: 8px; flex-wrap: wrap; }
+    details.agent-detail { margin-top: 10px; border-top: 1px solid rgba(148, 163, 184, .18); padding-top: 8px; }
+    details.agent-detail summary { cursor: pointer; font-size: 12px; color: var(--text-muted); }
+    .agent-analyst { margin-top: 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(7, 11, 18, .55); font-size: 12px; }
+    .agent-analyst .mono { color: var(--text-muted); }
+    .agent-debate { display: grid; gap: 6px; margin-top: 8px; font-size: 12px; }
+    .agent-debate b { color: #e05a5a; }
+    .agent-debate .bear b { color: #3da678; }
+    .agent-recent { margin-top: 14px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
+    .agent-recent-row { display: inline-flex; gap: 10px; align-items: center; margin: 4px 10px 4px 0; padding: 5px 10px; border: 1px solid rgba(148, 163, 184, .18); border-radius: var(--radius-pill); font-size: 11px; color: var(--text-muted); background: rgba(13, 20, 32, .5); cursor: pointer; }
+    .agent-recent-row:hover { border-color: rgba(139, 92, 246, .5); }
+  
+    @media (max-width: 1060px) {
+      .desk-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div><div class="eyebrow">Scan and inspect</div><h1>选股台</h1><p>运行扫描、筛选候选股票、把看中的加入自选，并结合行业资金流向判断。</p></div>
+        <div class="button-row"><button class="button" data-scan="offline">离线扫描</button><button class="button primary" data-scan="online">更新数据并扫描</button></div>
+      </header>
+
+      <section class="panel" aria-label="候选池">
+        <div class="panel-header"><div><h2>候选池</h2><p><span id="result-count">—</span> · 扫描状态 <span id="scan-progress" class="mono">空闲</span> · 点击星标加入自选</p></div></div>
+        <div class="filters" style="margin-bottom:14px">
+          <input id="search" class="field" placeholder="代码或名称">
+          <select id="industry" class="field"><option value="">全部行业</option></select>
+          <select id="passed" class="field"><option value="">全部门槛</option><option value="true">已通过</option><option value="false">已淘汰</option></select>
+          <select id="sort" class="field"><option value="rank">按排名</option><option value="total">按综合分</option><option value="industry">按行业</option><option value="money_class">按资金确认</option></select>
+          <select id="order" class="field"><option value="asc">升序</option><option value="desc">降序</option></select>
+        </div>
+        <div class="table-wrap">
+          <table><thead><tr><th style="width:44px">自选</th><th>排名</th><th>股票</th><th>行业</th><th>综合分</th><th>门槛</th><th>结果</th><th>资金确认</th></tr></thead><tbody id="stock-rows"></tbody></table>
+        </div>
+      </section>
+
+
+      <section class="panel" aria-label="AI 研判">
+        <div class="panel-header">
+          <div><h2>AI 研判</h2><p>情绪周期 + 波浪结构 + 舆情 + 走势的多 agent 短线研判：粗筛 → 深度学习 → 多空辩论</p></div>
+          <div id="agent-status" class="agent-status">读取配置中…</div>
+        </div>
+        <div class="agent-config">
+          <label class="agent-field">候选数量<input id="agent-candidates" type="number" min="1" max="200" step="1" inputmode="numeric"></label>
+          <label class="agent-field">深度学习<input id="agent-depth" type="number" min="1" max="30" step="1" inputmode="numeric"></label>
+          <label class="agent-field">最终输出<input id="agent-final" type="number" min="1" max="10" step="1" inputmode="numeric"></label>
+          <label class="agent-force"><input id="agent-force" type="checkbox"> 强制重跑</label>
+          <button id="agent-run" class="button primary" type="button">开始研判</button>
+          <div style="flex:1"></div>
+          <div id="agent-pool-note" class="agent-pool-note"></div>
+        </div>
+        <div id="agent-progress" class="agent-progress" hidden>
+          <div class="progress-head"><span id="agent-stage">排队中</span><span id="agent-step" class="mono muted"></span></div>
+          <div class="progress-track"><div id="agent-bar" class="progress-fill"></div></div>
+          <div id="agent-message" class="mf-note" style="margin-top:6px"></div>
+        </div>
+        <div id="agent-results" class="agent-results"></div>
+        <div id="agent-recent" class="agent-recent"></div>
+      </section>
+  
+      <div class="desk-grid">
+        <div class="col-stack">
+          <div class="detail-grid">
+            <article class="panel">
+              <div class="panel-header"><div><h2 id="detail-title">选择一只股票</h2><p id="detail-summary">从候选表点击股票查看详情</p></div></div>
+              <div id="factor-bars" class="stack"><div class="empty-state">等待选择股票</div></div>
+            </article>
+            <article class="panel raised">
+              <div class="panel-header"><div><h2>决策依据</h2><p>得分、门槛和资金确认</p></div></div>
+              <div id="detail-meta" class="stack"><div class="empty-state">暂无详情</div></div>
+            </article>
+          </div>
+
+          <section class="panel" aria-label="最近行情">
+            <div class="panel-header"><div><h2>最近行情</h2><p>查询严格限制在扫描日期及以前</p></div></div>
+            <div class="table-wrap"><table><thead><tr><th>日期</th><th>收盘</th><th>涨跌幅</th><th>成交额</th></tr></thead><tbody id="history-rows"></tbody></table></div>
+          </section>
+        </div>
+
+        <div class="col-stack">
+          <section class="panel" aria-label="自选股行情">
+            <div class="panel-header">
+              <div><h2>自选股行情</h2><p>点击行跳转 K 线 · 行情为各自最新交易日</p></div>
+              <a class="button" href="p10_watchlist.html">管理自选</a>
+            </div>
+            <div class="watch-toolbar" style="margin-bottom:12px">
+              <input id="watch-add-code" class="field" placeholder="输入代码或名称添加" autocomplete="off" aria-label="添加自选股">
+              <button id="watch-add-btn" class="button primary" type="button">添加</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>股票</th><th>收盘</th><th>涨跌幅</th><th>最新交易日</th><th></th></tr></thead>
+                <tbody id="watch-rows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel" aria-label="行业资金流向">
+            <div class="panel-header"><div><h2>行业资金流向</h2><p class="mf-note" id="mf-industry-note">按最新资金流交易日聚合 · 净流入红涨绿跌</p></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>行业</th><th>净流入</th><th>大单净额</th><th>超大单净额</th><th>覆盖股票</th></tr></thead>
+                <tbody id="industry-mf-rows"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/desk.js"></script>
+</body>
+</html>

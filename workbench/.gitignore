@@ -1,0 +1,17 @@
+# 密钥与本地数据，绝不提交
+.env
+data/
+*.duckdb
+*.duckdb.wal
+*.parquet
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# 运行产物
+out/
+*.log

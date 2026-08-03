@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes 股票量化工作台</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div>
+          <div class="eyebrow">Decision surface</div>
+          <h1>市场总览</h1>
+          <p>只显示最新数据状态、扫描漏斗和最终入选结果。行情通过 Tushare 更新，页面统一读取 DuckDB。</p>
+        </div>
+        <div class="header-meta"><div id="updated-at">等待数据</div><div>交易日 <span id="trade-date">—</span></div></div>
+      </header>
+
+      <section class="grid grid-4">
+        <article class="panel metric"><span class="metric-label">候选召回</span><strong id="metric-candidates" class="metric-value">—</strong><span class="metric-note">进入因子计算的股票</span></article>
+        <article class="panel metric"><span class="metric-label">完成打分</span><strong id="metric-scored" class="metric-value">—</strong><span class="metric-note">具备完整上下文</span></article>
+        <article class="panel metric"><span class="metric-label">通过门槛</span><strong id="metric-passed" class="metric-value">—</strong><span class="metric-note">满足策略硬条件</span></article>
+        <article class="panel metric"><span class="metric-label">最终入选</span><strong id="metric-final" class="metric-value accent">—</strong><span id="scan-state" class="metric-note">—</span></article>
+      </section>
+
+      <section class="grid grid-3" style="margin-top:16px">
+        <article class="panel span-2">
+          <div class="panel-header"><div><h2>最新入选</h2><p>点击股票进入选股台查看完整归因</p></div><button id="refresh" class="button">刷新</button></div>
+          <div class="table-wrap">
+            <table><thead><tr><th>排名</th><th>股票</th><th>行业</th><th>综合分</th><th>资金确认</th><th>归因</th></tr></thead><tbody id="pick-rows"></tbody></table>
+          </div>
+        </article>
+        <article class="panel raised">
+          <div class="panel-header"><div><h2>数据仓库</h2><p>核心表行数与最新日期</p></div></div>
+          <div id="table-status" class="stack"></div>
+        </article>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/overview.js"></script>
+</body>
+</html>

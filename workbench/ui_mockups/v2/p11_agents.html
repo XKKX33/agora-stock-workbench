@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Agent · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+  <style>
+    body {
+      background-image:
+        radial-gradient(1100px 560px at 12% -16%, rgba(62, 198, 255, .09), transparent 60%),
+        radial-gradient(950px 540px at 92% -6%, rgba(139, 92, 246, .11), transparent 64%),
+        radial-gradient(1100px 760px at 50% 116%, rgba(124, 58, 237, .06), transparent 62%);
+      background-attachment: fixed;
+    }
+    .mode-tabs {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      margin-bottom: 16px;
+      padding: 4px;
+      border-radius: var(--radius-pill);
+      background: rgba(255,255,255,.03);
+    }
+    .mode-tabs .tab-btn {
+      padding: 7px 20px; border: 1px solid rgba(148,163,184,.18); border-radius: var(--radius-pill);
+      background: rgba(255,255,255,.02); font-size: 12px; cursor: pointer; transition: var(--t);
+      color: var(--text-muted);
+      backdrop-filter: blur(4px);
+    }
+    .mode-tabs .tab-btn:hover { border-color: rgba(167,139,250,.50); background: rgba(139,92,246,.10); color: #fff; }
+    .mode-tabs .tab-btn.active {
+      border-color: rgba(139,92,246,.6); background: rgba(139,92,246,.20); color: #fff;
+      box-shadow: 0 0 14px rgba(124,58,237,.28);
+    }
+    .agent-config {
+      display: grid; grid-template-columns: auto 1fr; gap: 10px 14px; align-items: end;
+      padding: 16px 18px; border-radius: var(--radius);
+      border: 1px solid rgba(139,92,246,.18);
+      background: linear-gradient(135deg, rgba(62,198,255,.04), rgba(139,92,246,.08));
+      margin-bottom: 12px;
+    }
+    .agent-field {
+      display: grid; gap: 4px; font-size: 11px; color: var(--text-muted);
+    }
+    .agent-field .field-label {
+      display: flex; align-items: baseline; gap: 6px;
+      font-size: 11px; color: var(--text-muted); letter-spacing: .02em;
+    }
+    .agent-field .field-label .hint {
+      font-size: 10px; color: var(--text-muted); opacity: .8;
+      font-weight: 400;
+    }
+    .agent-field input.field-sm { width: 112px; min-height: 30px; }
+    .agent-field input.field-md { width: 200px; min-height: 30px; }
+    .agent-field .chk { width: auto; min-height: auto; }
+    .agent-config .config-actions {
+      grid-column: 1 / -1;
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      padding-top: 6px;
+      border-top: 1px solid rgba(148,163,184,.10);
+    }
+    .agent-status { font-size: 12px; color: var(--text-muted); max-width: 360px; text-align: right; line-height: 1.7; }
+    .agent-pool-note { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .agent-progress {
+      margin: 12px 0; padding: 14px 16px; border-radius: var(--radius);
+      border: 1px solid rgba(139,92,246,.22);
+      background: linear-gradient(135deg, rgba(62,198,255,.05), rgba(139,92,246,.08));
+      backdrop-filter: blur(6px);
+    }
+    .progress-head { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 7px; }
+    .progress-track { height: 7px; border-radius: var(--radius-pill); background: var(--navy); overflow: hidden; }
+    .progress-fill {
+      height: 100%; width: 0; border-radius: var(--radius-pill);
+      background: linear-gradient(90deg, #3ec6ff, #8b5cf6);
+      box-shadow: 0 0 18px rgba(124,58,237,.55);
+      transition: width .3s var(--ease);
+    }
+    .agent-results {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; margin-top: 12px;
+    }
+    .agent-card {
+      border: 1px solid rgba(139,92,246,.18); border-radius: var(--radius);
+      padding: 16px;
+      background: linear-gradient(160deg, rgba(62,198,255,.04), rgba(139,92,246,.07));
+      transition: var(--t);
+      backdrop-filter: blur(4px);
+    }
+    .agent-card:hover {
+      border-color: rgba(139,92,246,.34);
+      box-shadow: 0 0 0 1px rgba(139,92,246,.10), 0 0 28px -12px rgba(124,58,237,.26);
+    }
+    .agent-card-head {
+      display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px;
+      margin-bottom: 6px;
+    }
+    .agent-card-head .stock-label { display: flex; align-items: center; gap: 8px; }
+    .agent-card-head strong { font-size: 15px; }
+    .agent-card-head .mono { font-size: 11px; color: var(--text-muted); }
+    .verdict-bull { color: #e05a5a; border-color: rgba(224,90,90,.40); }
+    .verdict-bear { color: #3da678; border-color: rgba(61,166,120,.40); }
+    .verdict-flat { color: #c49a4a; border-color: rgba(196,154,74,.40); }
+    .agent-score-row { display: flex; align-items: center; gap: 8px; margin: 8px 0 5px; }
+    .agent-score-track { flex: 1; height: 5px; border-radius: var(--radius-pill); background: var(--navy); overflow: hidden; }
+    .agent-score-fill { height: 100%; border-radius: var(--radius-pill); background: linear-gradient(90deg, #3ec6ff, #8b5cf6); }
+    .agent-thesis { font-size: 12.5px; line-height: 1.7; margin: 6px 0; }
+    .agent-action { font-size: 12px; color: #a5b4fc; margin: 3px 0 6px; }
+    .agent-risks { margin: 4px 0 8px; padding: 0; list-style: none; display: grid; gap: 3px; }
+    .agent-risks li { font-size: 12px; color: var(--text-muted); line-height: 1.6; padding-left: 13px; position: relative; }
+    .agent-risks li::before { content: "!"; position: absolute; left: 0; top: 0; color: #c49a4a; font-weight: 700; }
+    .agent-card-foot { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .agent-source { font-size: 11px; color: var(--text-muted); margin: 0 0 6px; }
+    details.agent-detail { margin-top: 8px; border-top: 1px solid rgba(148,163,184,.12); padding-top: 8px; }
+    details.agent-detail summary { cursor: pointer; font-size: 12px; color: var(--text-muted); padding: 2px 0; }
+    details.agent-detail summary:hover { color: var(--accent); }
+    .agent-analyst { margin-top: 6px; padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(255,255,255,.03); font-size: 12px; }
+    .agent-analyst .mono { color: var(--text-muted); }
+    .agent-debate { display: grid; gap: 5px; margin-top: 6px; font-size: 12px; }
+    .agent-debate b { color: #e05a5a; }
+    .agent-debate .bear b { color: #3da678; }
+    .agent-recent { margin-top: 14px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
+    .agent-recent-label { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; letter-spacing: .06em; }
+    .agent-recent-row {
+      display: inline-flex; gap: 8px; align-items: center;
+      margin: 3px 8px 3px 0; padding: 5px 12px;
+      border: 1px solid rgba(139,92,246,.20); border-radius: var(--radius-pill);
+      font-size: 12px; cursor: pointer; transition: var(--t);
+    }
+    .agent-recent-row:hover { border-color: rgba(139,92,246,.48); background: rgba(139,92,246,.08); }
+
+    /* ===== 增强排版 ===== */
+    /* 模式切换胶囊：高亮态更醒目 */
+    .mode-tabs .tab-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      position: relative; overflow: hidden;
+      min-height: 30px;
+      border-color: transparent;
+      background: rgba(255,255,255,.04);
+    }
+    .mode-tabs .tab-btn::after {
+      content: '';
+      position: absolute; left: 14px; right: 14px; bottom: 4px; height: 2px;
+      border-radius: var(--radius-pill);
+      background: linear-gradient(90deg, #3ec6ff, #8b5cf6);
+      opacity: 0; transform: translateY(3px); transition: var(--t);
+    }
+    .mode-tabs .tab-btn.active::after { opacity: 1; transform: translateY(0); }
+    .mode-tabs .tab-btn.active {
+      background: linear-gradient(135deg, rgba(62,198,255,.16), rgba(139,92,246,.22));
+      box-shadow: 0 0 16px rgba(124,58,237,.30), inset 0 0 0 1px rgba(139,92,246,.25);
+    }
+
+    /* 参数配置区：更清晰的分组与可读性 */
+    .agent-config {
+      box-shadow: 0 0 0 1px rgba(139,92,246,.07), 0 12px 34px -24px rgba(0,0,0,.45);
+      padding: 18px 20px;
+    }
+    .agent-config .agent-field {
+      padding: 8px 10px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      background: rgba(255,255,255,.02);
+      transition: var(--t);
+      min-width: 150px;
+    }
+    .agent-config .agent-field:hover {
+      border-color: rgba(139,92,246,.16);
+      background: rgba(255,255,255,.045);
+    }
+    .agent-field input.field-sm, .agent-field input.field-md {
+      width: max(100%, 100px);
+      min-height: 32px; margin-top: 1px;
+      box-sizing: border-box;
+    }
+    .agent-config .config-actions {
+      padding-top: 10px; margin-top: 2px;
+      border-top-color: rgba(148,163,184,.14);
+    }
+
+    /* 状态文案：像一枚胶囊徽标 */
+    .agent-status {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 6px 12px; border-radius: var(--radius-pill);
+      background: rgba(139,92,246,.08);
+      border: 1px solid rgba(139,92,246,.18);
+      font-size: 12px; color: var(--text-muted);
+      backdrop-filter: blur(4px);
+    }
+
+    /* 进度条：更高对比度 */
+    .agent-progress {
+      border-left: 3px solid rgba(139,92,246,.55);
+      box-shadow: 0 0 0 1px rgba(139,92,246,.06), 0 10px 30px -20px rgba(124,58,237,.25);
+    }
+    .progress-head .mf-note, .progress-head span { font-weight: 500; }
+    .progress-track { background: rgba(0,0,0,.35); box-shadow: inset 0 0 0 1px rgba(139,92,246,.12); }
+
+    /* 结果卡片：上浮一点 */
+    .agent-card {
+      position: relative;
+      overflow: hidden;
+    }
+    .agent-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, rgba(62,198,255,.35), rgba(139,92,246,.6), transparent);
+      opacity: 0; transition: var(--t);
+    }
+    .agent-card:hover { transform: translateY(-2px); }
+    .agent-card:hover::before { opacity: 1; }
+    .agent-card-head strong { letter-spacing: .01em; }
+
+    /* 最近查询标签：统一高度 */
+    .agent-recent-row {
+      min-height: 28px; padding: 6px 14px;
+      font-weight: 500;
+      color: var(--text-muted);
+      backdrop-filter: blur(3px);
+    }
+    .agent-recent-row:hover {
+      color: #fff;
+      box-shadow: 0 0 16px -6px rgba(139,92,246,.5);
+      transform: translateY(-1px);
+    }
+
+    /* 空状态：更友好的提示 */
+    .agent-empty {
+      border: 1px dashed rgba(139,92,246,.22);
+      border-radius: var(--radius);
+      margin-top: 12px;
+      padding: 34px 20px;
+      background: rgba(255,255,255,.015);
+      letter-spacing: .02em;
+    }
+
+    /* 细节区 hover 反馈 */
+    details.agent-detail summary { border-radius: var(--radius-sm); padding: 4px 6px; transition: var(--t); }
+    details.agent-detail summary:hover { background: rgba(139,92,246,.07); }
+
+    /* 股票代码下拉候选选中态 */
+    .agent-analyst { border-left: 2px solid rgba(62,198,255,.30); }
+</style>
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div>
+          <div class="eyebrow">Multi‑Agent · Short‑term Desk</div>
+          <h1>AI Agent</h1>
+          <p>个股深度研判 + 选股流程（候选池&rarr;粗筛&rarr;三位分析师&rarr;多空辩论&rarr;最优 N 只）</p>
+        </div>
+        <div class="button-row">
+          <a class="button" href="p12_settings.html">⚙ API 设置</a>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div><h2 id="mode-title">个股研判</h2><p id="mode-desc">输入一只股票，三位分析师 + 多空辩论 + 风控出结论</p></div>
+          <div id="agent-status" class="agent-status">读取配置中…</div>
+        </div>
+
+        <div class="mode-tabs">
+          <button type="button" class="tab-btn active" id="mode-single" data-mode="single">📊 个股研判</button>
+          <button type="button" class="tab-btn" id="mode-flow" data-mode="flow">📋 选股流程</button>
+        </div>
+
+        <div id="single-fields" class="agent-config">
+          <label class="agent-field"><span class="field-label">股票代码</span><input id="agent-ts-code" class="field field-md" type="text" placeholder="如 000001.SZ" list="agent-stock-options" autocomplete="off"></label>
+          <datalist id="agent-stock-options"></datalist>
+          <label class="agent-field" style="justify-self:end"><input id="agent-force-single" type="checkbox" class="chk" style="width:auto"> 强制重跑</label>
+          <div class="config-actions">
+            <button id="agent-single-run" class="button primary" type="button" style="min-height:30px;padding:0 20px;font-size:12px">开始个股研判</button>
+          </div>
+        </div>
+
+        <div id="flow-fields" class="agent-config" hidden>
+          <label class="agent-field"><span class="field-label">候选数量 <span class="hint">初始筛选</span></span><input id="agent-candidates" class="field field-sm" type="number" min="1" max="200" step="1"></label>
+          <label class="agent-field"><span class="field-label">深度学习 <span class="hint">每批次</span></span><input id="agent-depth" class="field field-sm" type="number" min="1" max="30" step="1"></label>
+          <label class="agent-field"><span class="field-label">最终输出 <span class="hint">最优 N 只</span></span><input id="agent-final" class="field field-sm" type="number" min="1" max="10" step="1"></label>
+          <label class="agent-field" style="justify-self:end"><input id="agent-force-flow" type="checkbox" class="chk" style="width:auto"> 强制重跑</label>
+          <div class="config-actions">
+            <button id="agent-flow-run" class="button primary" type="button" style="min-height:30px;padding:0 20px;font-size:12px">开始选股流程</button>
+          </div>
+        </div>
+
+        <div id="agent-pool-note" class="agent-pool-note"></div>
+
+        <div id="agent-progress" class="agent-progress" hidden>
+          <div class="progress-head"><span id="agent-stage">排队中</span><span id="agent-step" class="mono muted"></span></div>
+          <div class="progress-track"><div id="agent-bar" class="progress-fill"></div></div>
+          <div id="agent-message" class="mf-note" style="margin-top:5px;font-size:12px"></div>
+        </div>
+
+        <div id="agent-results" class="agent-results"></div>
+        <div id="agent-recent" class="agent-recent"></div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/agents.js"></script>
+</body>
+</html>

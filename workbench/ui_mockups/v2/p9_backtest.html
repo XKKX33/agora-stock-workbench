@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>组合回测 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div>
+          <div class="eyebrow">Portfolio backtest</div>
+          <h1>组合回测</h1>
+          <p>在真实选股台账上按<strong>不重叠调仓</strong>结算：每隔 N 个截面开一笔，上一笔结清后再开下一笔。没有回填的期次整期跳过，不当 0 收益。</p>
+        </div>
+        <div class="button-row">
+          <select id="strategy" class="field"><option value="">全部策略</option></select>
+          <select id="horizon" class="field"></select>
+          <label class="field-inline">持仓 <input id="top-k" class="field narrow" type="number" min="1" max="50" step="1" value="5"></label>
+          <label class="field-inline">成本bp <input id="cost-bps" class="field narrow" type="number" min="0" max="500" step="5"></label>
+          <button id="refresh" class="button primary">重算</button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice" hidden></div>
+
+      <section class="grid grid-4" id="metric-cards"></section>
+      <section class="grid grid-4" id="metric-cards-2" style="margin-top:12px"></section>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-header">
+          <div><h2>净值曲线</h2><p>实线为净（已扣换手成本），虚线为毛。横轴是调仓日，不是自然日</p></div>
+          <div id="curve-meta" class="header-meta"></div>
+        </div>
+        <div id="equity-chart" class="sparkline hero"></div>
+        <div id="gap-hint" class="inline-warning" hidden></div>
+      </section>
+
+      <section class="detail-grid" style="margin-top:16px">
+        <article class="panel">
+          <div class="panel-header"><div><h2>逐期结算</h2><p>每一行都是一笔真实开平仓，收益来自台账已回填的 retN</p></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>调仓日</th><th>持仓</th><th>毛收益</th><th>净收益</th><th>换手</th><th>净值</th></tr></thead>
+              <tbody id="period-rows"></tbody>
+            </table>
+          </div>
+          <div class="section-label" style="margin-top:18px">跳过的期次<span id="skip-hint" class="muted"></span></div>
+          <div id="skip-rows" class="stack"></div>
+        </article>
+        <article class="panel raised">
+          <div class="panel-header"><div><h2>口径与假设</h2><p>这些是假设，不是事实</p></div></div>
+          <div id="assumptions" class="stack"></div>
+          <div class="section-label" style="margin-top:18px">样本覆盖</div>
+          <div id="coverage" class="stack"></div>
+        </article>
+      </section>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-header">
+          <div><h2>多策略并排</h2><p>同一期限、同一成本下逐策略跑一遍。算不出的策略照样占一行，并说明原因</p></div>
+          <div id="compare-meta" class="header-meta"></div>
+        </div>
+        <div id="compare-chart" class="sparkline tall"></div>
+        <div class="table-wrap" style="margin-top:14px">
+          <table>
+            <thead><tr><th>策略</th><th>期数</th><th>净收益</th><th>毛收益</th><th>年化</th><th>最大回撤</th><th>夏普</th><th>胜率</th><th>平均换手</th><th>覆盖</th></tr></thead>
+            <tbody id="compare-rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/assets/vendor/echarts.min.js"></script>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/backtest.js"></script>
+</body>
+</html>

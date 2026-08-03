@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>台账复盘 · Hermes Quant</title>
+  <link rel="stylesheet" href="/assets/css/theme.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <div class="app-layout">
+    <div id="app-shell"></div>
+    <main class="main-shell">
+      <div id="error-banner" class="error-banner" role="alert"></div>
+      <header class="page-header">
+        <div><div class="eyebrow">Post-trade review</div><h1>台账复盘</h1><p>查看真实选股记录和已经发生的后续收益。样本不足时保持空值，不生成虚假胜率。</p></div>
+        <div class="button-row"><select id="strategy" class="field"><option value="">全部策略</option><option value="strong_mainup">强主升</option></select><button id="refresh" class="button">刷新</button></div>
+      </header>
+
+      <section class="grid grid-4">
+        <article class="panel metric"><span class="metric-label">选股记录</span><strong id="ledger-total" class="metric-value">—</strong><span class="metric-note">全部台账行</span></article>
+        <article class="panel metric"><span class="metric-label">T+1 平均</span><strong id="ret1-avg" class="metric-value">—</strong><span id="ret1-sample" class="metric-note">—</span></article>
+        <article class="panel metric"><span class="metric-label">T+5 平均</span><strong id="ret5-avg" class="metric-value">—</strong><span id="ret5-sample" class="metric-note">—</span></article>
+        <article class="panel metric"><span class="metric-label">T+10 平均</span><strong id="ret10-avg" class="metric-value">—</strong><span id="ret10-sample" class="metric-note">—</span></article>
+      </section>
+      <span id="ret3-avg" hidden></span><span id="ret3-sample" hidden></span>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-header"><div><h2>历史选股</h2><p>收益为空表示对应交易日尚未发生或尚未回填</p></div></div>
+        <div class="table-wrap"><table><thead><tr><th>运行时间</th><th>股票</th><th>行业</th><th>综合分</th><th>资金确认</th><th>T+1</th><th>T+3</th><th>T+5</th><th>T+10</th></tr></thead><tbody id="ledger-rows"></tbody></table></div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/assets/js/app-shell.js"></script>
+  <script type="module" src="/assets/js/pages/ledger.js"></script>
+</body>
+</html>
