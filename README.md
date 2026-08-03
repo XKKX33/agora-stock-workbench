@@ -12,7 +12,7 @@
 - DuckDB：单文件保存行情、资金流、交易日历、选股台账、任务状态与舆情。
 - Tushare：联网更新 A 股行情、交易日历与资金流。
 - FastAPI + Uvicorn：接口层与页面托管。
-- HTML/CSS/原生 JavaScript + ECharts：十一个工作台页面（总览、选股台、情绪、流程、因子、台账、行情 K 线、舆情、AI 复盘、回测、自选），Figma 风格暗色主题（圆角分块、柔和阴影、丝滑动效），缺数据一律按三态显示，不补零。
+- HTML/CSS/原生 JavaScript + ECharts：十三个工作台页面（总览、选股台、情绪、流程、因子、台账、行情 K 线、舆情、AI 复盘、回测、自选、AI Agent、设置），Figma 风格暗色主题（圆角分块、柔和阴影、丝滑动效），缺数据一律按三态显示，不补零。
 - `app/services/kline.py`：个股搜索与 K 线指标计算（MA / MACD / KDJ / RSI / BOLL），全部在后端算出、前端只画图。
 - `app/services/screener.py`：全市场横截面筛选，支持涨跌幅、量比、行业过滤与排序分页。
 - `app/services/watchlist.py`：自选股维护与行情列表（搜索/行业/排序筛选，添加移除幂等，股票不存在返回 404 而不是静默吞掉）。
@@ -101,7 +101,7 @@ C:\Users\xuan\anaconda3\python.exe -m pytest tests -q --import-mode=importlib --
 - 带三级标注的复盘装配：`fact`（事实）/ `derived`（规则计算结果）/ `unverified`（待验证判断）。
 - 行情 K 线页：个股搜索、日 K 图（MA5/10/20/60、MACD、KDJ、RSI、BOLL），后端算指标、前端只渲染。
 - 全市场筛选接口：`GET /api/screener`，涨跌幅/量比/行业过滤、多字段排序、分页。
-- 十页面动态读取真实数据，缺数据显示为缺失而不是补零；Figma 风格暗色主题（统一圆角令牌、柔和阴影、卡片入场动效），侧栏共享数据链路状态条（舆情/复盘/AI 三态）。
+- 十三页面动态读取真实数据，缺数据显示为缺失而不是补零；Figma 风格暗色主题（统一圆角令牌、柔和阴影、卡片入场动效），侧栏共享数据链路状态条（舆情/复盘/AI 三态）。
 - 滚动回测与多策略对比（`/api/backtest`、`/api/backtest/compare`），默认非重叠调仓防收益虚高，覆盖率与跳过期明示。
 - 因子机器学习体检（`/api/analytics/factors`）：逐日 IC、分桶收益、AUC、过拟合缺口，样本不足或模型不达标时如实报告。
 - AI 接口边界，未配置时明确标记。
