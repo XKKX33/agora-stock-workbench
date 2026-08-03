@@ -205,13 +205,19 @@ def test_calendar_lookahead_covers_longest_horizon():
     这是上面两个用例的上游:日历末日 = as_of 时,未到期样本无从判别。
     不复述实现里的算式(那样测的是"我抄对了没有"),改成校验实际结果:
     末日严格在未来,且窗口内的工作日在扣掉一整段连休后仍够 max(HORIZONS) 个。
+
+    两处单位必须对齐,否则这条测试会自己算错:
+    - 从**今天零点**起算,不从 datetime.now() 起算。末日是按日期取的,
+      带上时分秒会让 (end_dt - now).days 少 1 天,于是过了午夜就少数一个工作日。
+    - 连休余量要折成**工作日**再扣。_HOLIDAY_BUFFER_DAYS 是自然日,
+      直接从工作日计数里减等于按 7/5 倍重罚,余量刚好时就会假报失败。
     """
     from datetime import datetime, timedelta
 
     from engine.run_scan import _HOLIDAY_BUFFER_DAYS, _calendar_lookahead_end
 
     end = _calendar_lookahead_end()
-    today = datetime.now()
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     _check("末日格式为 YYYYMMDD", len(end) == 8 and end.isdigit())
     _check("末日严格在今天之后", end > today.strftime("%Y%m%d"))
 
@@ -220,9 +226,10 @@ def test_calendar_lookahead_covers_longest_horizon():
         1 for i in range(1, (end_dt - today).days + 1)
         if (today + timedelta(days=i)).weekday() < 5
     )
+    buffer_weekdays = _HOLIDAY_BUFFER_DAYS * 5 // 7
     max_sessions = max(HORIZONS.values())
     _check("扣掉一整段连休后仍覆盖最长期限",
-           weekdays - _HOLIDAY_BUFFER_DAYS >= max_sessions)
+           weekdays - buffer_weekdays >= max_sessions)
 
 
 def test_evaluate_metrics():

@@ -61,6 +61,35 @@ MIN_DAYS_FOR_CAGR = 30
 MIN_PERIODS_FOR_SHARPE = 4
 
 
+def _turnover(prev_codes: Optional[Sequence[str]], codes: Sequence[str]) -> float:
+    """等权组合从 prev_codes 调到 codes 的换手率(占组合市值的比例)。
+
+    口径是**权重变化的一半**:``sum|w_new - w_old| / 2``,等权下 ``w = 1/n``。
+    除以 2 是因为一次调仓里卖出额和买入额相等(卖旧的钱买新的),
+    只算其中一边才是"这次动了多大比例的仓",cost_bps 按双边成本计价。
+
+    为什么不能用 ``1 - kept / len(codes)``:那个分母是**新**篮子。
+    篮子变大时它恰好等于权重口径,变小时却会错——5 只缩到 3 只且 3 只全留仓,
+    它算出 0,等于把卖掉的两只(占 40% 仓位)白送,不收任何成本。
+    权重口径对两个方向都成立:留仓的票也要从 20% 补到 33%,那也是真实交易。
+
+    首期建仓没有上一期持仓,记满仓 1.0。按权重公式只会算出 0.5(只有买没有卖),
+    但建仓是一次实打实的全额买入,记 1.0 偏保守——宁可高估成本,
+    不让净值曲线因为口径而好看。
+    """
+    if not prev_codes:
+        return 1.0
+    old_weight = 1.0 / len(prev_codes)
+    new_weight = 1.0 / len(codes)
+    old_set, new_set = set(prev_codes), set(codes)
+    drift = 0.0
+    for code in old_set | new_set:
+        held_old = old_weight if code in old_set else 0.0
+        held_new = new_weight if code in new_set else 0.0
+        drift += abs(held_new - held_old)
+    return drift / 2.0
+
+
 def _finite(value) -> Optional[float]:
     """NaN / inf 一律转 None。"算不出"和"算出来是 0"必须分开。"""
     if value is None:
@@ -278,7 +307,11 @@ class BacktestResult:
                     "上一笔结清后再开下一笔,不做重叠持仓"
                 ),
                 "cost_bps": self.cost_bps,
-                "cost_note": "只对换手部分收双边成本;上期留下的持仓不重复计费",
+                "cost_note": (
+                    "换手率按等权权重变化算(sum|w_new - w_old| / 2),"
+                    "只对换手部分收双边成本;留仓部分只对权重变动的那一截计费。"
+                    "买卖不分开计价,印花税只在卖出端的不对称暂未建模"
+                ),
                 "weighting": "等权买入 rank 前 N 名",
             },
             "coverage": {
@@ -370,8 +403,7 @@ def run_backtest(
 
         codes = tuple(str(c) for c in basket["ts_code"])
         gross = float(returns.mean())
-        kept = 0 if prev_codes is None else len(set(prev_codes) & set(codes))
-        turnover = 1.0 - kept / len(codes)
+        turnover = _turnover(prev_codes, codes)
         net = gross - cost_bps / 10000.0 * turnover
         gross_equity *= 1.0 + gross
         equity *= 1.0 + net

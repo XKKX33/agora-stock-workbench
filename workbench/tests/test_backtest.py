@@ -92,6 +92,45 @@ def test_turnover_counts_only_changed_names():
     assert result.periods[1].turnover == 0.5
 
 
+def test_shrinking_basket_still_charges_the_exits():
+    """篮子从 5 只缩到 3 只,3 只全留仓 —— 卖掉的两只必须收成本。
+
+    这条是真的错过一次:旧公式 ``1 - kept / len(codes)`` 的分母是**新**篮子,
+    5 只缩到 3 只时算出 ``1 - 3/3 = 0``,等于把清掉的 40% 仓位白送。
+    原有的换手测试两期都是同样大小的篮子,所以这个方向一直没被覆盖。
+    """
+    days = _days(10)
+    base = _picks(days, codes=("A", "B", "C", "D", "E"))
+    # 第二个调仓日只剩 A/B/C:先删掉那天原本的 5 行,再拼回 3 行
+    frame = pd.concat(
+        [
+            base[base["as_of"] != days[5]],
+            _picks([days[5]], codes=("A", "B", "C")),
+        ],
+        ignore_index=True,
+    )
+    result = BT.run_backtest(frame, horizon="ret5", strategy="s1", top_k=5)
+
+    second = result.periods[1]
+    assert len(second.codes) == 3
+    # 权重口径:卖掉 D/E 各 20%,留仓三只每只从 20% 补到 33.3%
+    # sum|w_new - w_old| / 2 = (0.2 + 0.2 + 3 * 0.1333) / 2 = 0.4
+    assert round(second.turnover, 6) == 0.4
+    assert round(second.net_return, 6) == round(0.01 - 0.0030 * 0.4, 6)
+
+
+def test_growing_basket_charges_the_same_as_the_mirror_shrink():
+    """3 只加到 5 只与 5 只缩到 3 只的换手相等——权重口径对两个方向都成立。
+
+    两边只能比到浮点精度:求和顺序来自 set 的迭代序,两次调用不一样,
+    末位会差一个 ulp。这里要钉的是口径对称,不是逐位相等。
+    """
+    grow = BT._turnover(("A", "B", "C"), ("A", "B", "C", "D", "E"))
+    shrink = BT._turnover(("A", "B", "C", "D", "E"), ("A", "B", "C"))
+
+    assert round(grow, 10) == round(shrink, 10) == 0.4
+
+
 def test_unfilled_return_skips_the_period_instead_of_counting_zero():
     """未回填不是 0 收益。整期跳过,并记下缺几只——用剩下的凑数会让口径悄悄变。"""
     days = _days(15)
