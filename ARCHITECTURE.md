@@ -102,6 +102,7 @@ close_pipeline.py 串联：确认交易日 → 更新行情 → 扫描 → 回�
 - `Store.upsert()` 是 DELETE+INSERT。
 - 扫描按 `(as_of, strategy)` 整组替换，同一交易日重跑不累积冗余批次。
 - 任务以 `(kind, trade_date, strategy)` 为抢占键，状态落 `task_runs` 表，服务重启后仍可查询；心跳超时判为僵死并允许重试。
+- `task_runs` 的读写统一收在 `app/services/tasks.py` 的 `TaskTracker`：抢占、心跳、落终态、按 `kind` 查历史、JSON 列解析与字段装饰只有一份实现。`ScanManager`（`kind="scan"`）与 `PipelineManager`（`kind="close_pipeline"`）都走这一层，只保留各自的执行体与 HTTP 语义（错误码、僵死阈值）。两个 Manager 各抄一份装饰逻辑必然漂移，而漂移的表现是页面上某类任务少一个字段，很难定位。
 - `picks` 主键为业务幂等键 `(as_of, strategy, ts_code)`（`as_of` 是横截面日期，`run_date` 只是写入时间）。旧库启动时自动迁移：去重保留最新 `run_date`，全程事务，失败回滚。
 
 ### 失败显式暴露
@@ -148,6 +149,5 @@ close_pipeline.py 串联：确认交易日 → 更新行情 → 扫描 → 回�
 
 ## 已知待办
 
-- `ScanManager` 尚未迁到统一的 `TaskTracker`。
 - 页面固定 `run_id` 与数据截止时间的能力尚未提供，所有页面查询最新全局扫描。
 - 舆情来源扩展（TrendRadar 之外更多来源待核验）；多 agent 研判需真实 OpenAI 兼容凭据（agent.enabled + base_url + model + WORKBENCH_AI_API_KEY）才可运行。

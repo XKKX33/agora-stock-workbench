@@ -121,7 +121,6 @@ C:\Users\xuan\anaconda3\python.exe -m pytest tests -q --import-mode=importlib --
 
 - 完成舆情来源合规调研并注册更多采集器（newsnow 等来源待补）；舆情正文级定向采集调研完成后，把真实新闻正文喂给舆情分析师。
 - 给 `agent` 段配置真实 base_url/model/API Key 并开启 `agent.enabled` 后，选股台 AI 研判即可用。
-- `ScanManager` 迁到统一的 `TaskTracker`。
 - 页面固定 `run_id` 与数据截止时间的能力。
 - 回测口径细化：换手率按篮子重合度算、单边成本按调仓次数计，未计入个股权重变化与买卖不对称。
 
