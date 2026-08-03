@@ -306,3 +306,29 @@
 ### 验证
 - 全量回归：**424 passed / 0 failed**。
 - 浏览器验收（headless Edge，8791）：p11/p12 页面渲染正常，导航含「AI Agent」「设置」，/api/settings 返回默认值和可用性提示。
+
+## 2026-08-03 第十二阶段：换手率口径修正 + 拆分超限的 db.py
+
+### 换手率漏收成本（真实缺陷，不是口径偏好）
+
+`backtest.py` 原本用 `turnover = 1.0 - kept / len(codes)`，分母是**新**篮子。篮子变大或不变时它恰好等于权重口径，**变小时会错**：5 只缩到 3 只且 3 只全留仓，算出 `1 - 3/3 = 0`，等于把清掉的 40% 仓位白送、不收任何成本。错误方向又是让净值**更好看**。原有换手测试两期篮子同样大小，所以这个方向一直没被覆盖。
+
+改为等权**权重变化的一半**：`sum|w_new - w_old| / 2`（新增 `_turnover()` helper）。除以 2 是因为一次调仓卖出额与买入额相等（卖旧的钱买新的），只算一边才是"这次动了多大比例的仓"，`cost_bps` 按双边计价。这个口径对两个方向都成立（5→3 与 3→5 都是 0.4），还额外抓到重合度公式**结构上抓不到**的一件事：留仓的票从 20% 补到 33% 也是真实交易。首期建仓记满仓 1.0（权重公式只算出 0.5，因为只有买没有卖），偏保守。
+
+新增两条回归测试：`test_shrinking_basket_still_charges_the_exits`（缩仓方向，就是漏掉的那条）与 `test_growing_basket_charges_the_same_as_the_mirror_shrink`（方向对称）。`as_dict()` 的 `cost_note` 同步改写，并明示**买卖不对称（印花税只在卖出端）仍未建模**——拆开买卖腿会把单个 `cost_bps` 旋钮换成一对，那是接口变更而非缺陷修复，留给用户定。`README.md:125` 原先把已实现的两项列为待办，收窄为只剩买卖不对称。
+
+### 拆分 db.py（1182 行 → 672 行）
+
+按**表族**拆成 mixin 放在同级模块，不动调用侧：
+- `engine/schema.py`（253 行）：`_SCHEMA` / `_PICKS_SCHEMA` 两个 DDL 常量。
+- `engine/db_news.py`（302 行）：`NewsAgentMixin`，只碰 news_sources / news_items / news_links / agent_runs / agent_judgments 五张表的 17 个方法。
+- `engine/db.py` 672 行，`class Store(NewsAgentMixin)`。
+
+**为什么用 mixin 而不是组合**：全项目 30 处写 `from engine.db import Store` 并直接调 `store.news_by_trade_date(...)`。组合（`store.news.by_trade_date`）要改 30 个调用点和一批测试，那是接口变更，不是拆文件。mixin 让 `Store` 的方法集合与拆分前完全一致。
+
+验收方式是与**拆分前的 git blob** 逐项比对，而不是只比内存里的模块：两个 DDL 常量字节级相同（8683 / 493 字符），19 张表拆前拆后一致；`Store` 的方法集合 50 个对 50 个，无缺无增。
+
+### 验证
+- 全量回归：**429 passed / 0 failed**（基线 427 → +2 换手率回归测试）。
+- 顺带修掉一条**先前就有**的测试缺陷：`test_calendar_lookahead_covers_longest_horizon` 把 `_HOLIDAY_BUFFER_DAYS`（14 个**自然日**）从**工作日**计数里减，单位混用且余量恰好为零，跨过午夜后就红。先按一整年逐个起始星期扫过 `_calendar_lookahead_end()` 确认实现是对的（最坏情形 24 个工作日对需要的 10 个交易日，余量 +4），才断定是测试的错——把缓冲换算成工作日并对跨度向下取整。
+- 三个模块均在 800 行上限内。`app/services/agents.py` 883 行仍超限，未处理。

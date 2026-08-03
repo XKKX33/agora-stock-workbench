@@ -17,7 +17,7 @@ vendor/     外部 GPL 源码(TrendRadar),不入本仓库版本历史
 ### engine（领域层）
 
 - `config.py`：读取 `settings.yaml` 与策略配置，路径统一相对 workbench 根解析。
-- `db.py`：DuckDB 表结构、幂等写入与查询。自选股表 `watchlist`（ts_code 主键 + 添加时间/排序）与增删查方法（`add_watchlist` / `remove_watchlist` / `watchlist_quotes`），资金流按行业聚合（`moneyflow_date_range` / `moneyflow_industry_summary`）。所有 `Store` 方法是唯一的数据访问出口。`Store.__init__` 打开库带 3 次短重试（20~50ms 退避）：Windows 下同进程并发打开同一 DuckDB 文件偶发文件句柄占用（WinError 32），重试失败仍上抛，不吞错。`ensure_schema=True` 路径会自动迁移 `picks` 旧主键（见「幂等」）。
+- `db.py` / `schema.py` / `db_news.py`：DuckDB 存储层，按**表族**拆成三个文件（原 `db.py` 1182 行超出自定的 800 行上限）。`schema.py` 只放建表 DDL 常量；`db_news.py` 是 `NewsAgentMixin`，装 news_sources / news_items / news_links / agent_runs / agent_judgments 的读写；`db.py` 留连接管理、行情与台账，`class Store(NewsAgentMixin)`。用 mixin 而不是组合，是因为全项目 30 处都写 `from engine.db import Store` 并直接调 `store.news_by_trade_date(...)`——mixin 让 `Store` 的方法集合与拆分前逐个相等，调用侧一行不动。表结构、幂等写入与查询口径不变。自选股表 `watchlist`（ts_code 主键 + 添加时间/排序）与增删查方法（`add_watchlist` / `remove_watchlist` / `watchlist_quotes`），资金流按行业聚合（`moneyflow_date_range` / `moneyflow_industry_summary`）。所有 `Store` 方法是唯一的数据访问出口。`Store.__init__` 打开库带 3 次短重试（20~50ms 退避）：Windows 下同进程并发打开同一 DuckDB 文件偶发文件句柄占用（WinError 32），重试失败仍上抛，不吞错。`ensure_schema=True` 路径会自动迁移 `picks` 旧主键（见「幂等」）。
 - `ingest_tushare.py`：更新行情、交易日历与资金流。
 - `universe.py`：硬过滤、行业热度、候选召回。
 - `factors/`：结构、趋势、MACD、成交量、题材、资金六类因子。
