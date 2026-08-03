@@ -40,6 +40,7 @@ vendor/     外部 GPL 源码(TrendRadar),不入本仓库版本历史
 - `services/`：业务装配与可用性判定（`overview` `stocks` `analytics` `news` `reviews` `ai` `scans` `pipelines` `scheduler` `tasks` `kline` `screener` `backtest` `watchlist` `agents`）。
 - `services/kline.py`：个股搜索 + 日 K 数据装配，MA5/10/20/60、EMA12/26、MACD、KDJ、RSI6/12/24、BOLL 全部后端计算；`quote` 附带换手率、量比、总市值/流通市值。
 - `services/screener.py`：全市场横截面筛选（涨跌幅、量比、行业过滤，字段排序 + 分页），读最近一次扫描结果。
+- `services/agents.py` / `services/agents_data.py`：多 agent 研判管理器，按**职责**拆成两个文件（原 `agents.py` 883 行超出自定的 800 行上限）。`agents_data.py` 是 `AgentDataMixin`，只做「库里的行情/技术指标/资金流/舆情 → 喂给模型的紧凑快照」（含 `_round` 安全取整：算不出留 None，不用 0 冒充）；`agents.py` 留任务编排、幂等抢占、AI 客户端与落库，`class AgentJudgeManager(AgentDataMixin)`。同样用 mixin 而不是组合——外部只 import `AgentJudgeManager`（`app/api/agents.py` 与 `app/main.py`），方法集合与拆分前逐个相等，调用侧不动。
 - `api/`：路由与参数校验，不含业务逻辑。
 - `errors.py`：`WorkbenchError` 统一错误信封。
 - `main.py`：应用装配、启动时表结构迁移、调度线程生命周期、十三页面白名单托管（`index.html` + `p1..p12`），`AgentJudgeManager` 生命周期。

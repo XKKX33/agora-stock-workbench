@@ -331,4 +331,19 @@
 ### 验证
 - 全量回归：**429 passed / 0 failed**（基线 427 → +2 换手率回归测试）。
 - 顺带修掉一条**先前就有**的测试缺陷：`test_calendar_lookahead_covers_longest_horizon` 把 `_HOLIDAY_BUFFER_DAYS`（14 个**自然日**）从**工作日**计数里减，单位混用且余量恰好为零，跨过午夜后就红。先按一整年逐个起始星期扫过 `_calendar_lookahead_end()` 确认实现是对的（最坏情形 24 个工作日对需要的 10 个交易日，余量 +4），才断定是测试的错——把缓冲换算成工作日并对跨度向下取整。
-- 三个模块均在 800 行上限内。`app/services/agents.py` 883 行仍超限，未处理。
+- 三个模块均在 800 行上限内。
+
+### 拆分 app/services/agents.py（883 行 → 589 行）
+
+同样的口径，但拆分依据是**职责**而不是表族——这个文件里两件事本来就不相干：任务编排（抢占 / 心跳 / 落终态 / AI 客户端 / 结果落库）和数据装配（库里的行情 → 喂给模型的紧凑快照）。
+
+- `app/services/agents_data.py`（327 行）：`AgentDataMixin`，`_build_pool` / `_compact_row` / `_macd_state` / `_load_snapshot` / `_stock_brief` / `_daily_brief` / `_weekly_brief` / `_moneyflow_brief` / `_news_brief` 九个方法，加上只被这一族用到的 `_round`（29 处调用全在簇内）。
+- `app/services/agents.py` 589 行，`class AgentJudgeManager(AgentDataMixin)`。
+
+搬动后 `numpy` 在 `agents.py` 里再无引用（两处 `np.nan` 都在 `_daily_brief` 内），已删掉该 import；`_compact_row` 里原本硬写的 `AgentJudgeManager._macd_state(...)` 同步改成 `AgentDataMixin._macd_state(...)`——跨类硬引用是这种搬动最容易留下的哑弹，它不会在 import 期报错，只在真正跑粗筛时才炸。
+
+外部只有 `app/api/agents.py` 与 `app/main.py` 两处 import `AgentJudgeManager`，测试没有直接碰任何私有方法，因此调用侧一行未动。验收同上：与拆分前的 git blob 比对，方法集合 25 个对 25 个，无缺无增。
+
+### 验证（拆分后）
+- 全量回归：**429 passed / 0 failed**，与拆分前基线一致。
+- 至此项目内已无超过 800 行的模块。
