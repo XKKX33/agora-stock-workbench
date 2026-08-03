@@ -325,6 +325,19 @@ def test_as_dict_carries_assumptions_and_curve_starting_at_one():
     assert payload["drawdown"]["max"] is not None
 
 
+def test_sharpe_discloses_that_the_risk_free_rate_is_zero():
+    """夏普偏高的原因必须随结果下发。
+
+    分子是收益均值本身而不是超额收益,算出来的数比真实夏普高。
+    这是个假设而非事实,和 cost_note / mode_note 一样得写进 assumptions,
+    不能只留在 _sharpe 的实现里让人自己去读代码。
+    """
+    payload = BT.run_backtest(_picks(_days(15)), horizon="ret5").as_dict()
+    note = payload["assumptions"]["sharpe_note"]
+
+    assert "无风险利率 = 0" in note
+    # 年化前提也得说:非重叠只保证独立,不保证同分布
+    assert "独立同分布" in note
 
 
 

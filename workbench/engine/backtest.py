@@ -250,6 +250,16 @@ class BacktestResult:
         return final ** (365.25 / span_days) - 1.0
 
     def _sharpe(self, returns: List[float]) -> Optional[float]:
+        """按调仓频率年化的夏普。**无风险利率取 0**,所以这是偏高的口径。
+
+        分子是收益均值本身而不是超额收益(未减无风险利率),真实夏普比这个低。
+        没减是因为回测跨期可能横跨利率变动,取哪个基准都是又一个假设;
+        与其偷偷塞一个数字进去,不如把"取 0"写进 assumptions 让人看见。
+
+        年化乘 sqrt(244 / 持仓天数),前提是各期收益独立同分布——非重叠调仓
+        让"独立"这一半基本成立,"同分布"则未必。期数 < 4 直接不给值:
+        4 个点算出来的标准差没有统计意义,给了反而被当成结论。
+        """
         if len(returns) < MIN_PERIODS_FOR_SHARPE:
             return None
         series = pd.Series(returns, dtype="float64")
@@ -313,6 +323,11 @@ class BacktestResult:
                     "买卖不分开计价,印花税只在卖出端的不对称暂未建模"
                 ),
                 "weighting": "等权买入 rank 前 N 名",
+                "sharpe_note": (
+                    "夏普按无风险利率 = 0 算(分子是收益均值本身,不是超额收益),"
+                    "因此偏高;年化用 sqrt(244 / 持仓天数),假设各期收益独立同分布。"
+                    f"调仓期数少于 {MIN_PERIODS_FOR_SHARPE} 期直接不给值"
+                ),
             },
             "coverage": {
                 "available_days": self.available_days,

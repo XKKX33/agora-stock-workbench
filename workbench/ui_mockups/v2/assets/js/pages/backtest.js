@@ -314,6 +314,7 @@ function renderAssumptions(payload) {
     kv("双边成本", a.cost_bps == null ? "—" : `${formatNumber(a.cost_bps, 1)} bp`),
     kv("成本计法", a.cost_note || "—"),
     kv("权重", a.weighting || "—"),
+    kv("夏普口径", a.sharpe_note || "—"),
   ].join("");
 
   const c = payload.coverage || {};
