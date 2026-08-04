@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -14,6 +16,7 @@ from engine.experiments import (
     backfill_experiment_returns,
     build_experiment_decisions,
     candidate_pool_hash,
+    required_entry_limit_dates,
 )
 
 
@@ -59,6 +62,34 @@ def test_candidate_pool_hash_is_order_independent_and_member_sensitive():
     assert original != changed
     assert len(original) == 64
     assert original == original.lower()
+
+
+def test_candidate_pool_hash_preserves_integer_json_type_across_numpy_scalars():
+    row = {
+        "ts_code": "A.SZ",
+        "name": "甲",
+        "industry": "一",
+        "total": 3,
+        "rank": 1,
+        "source_id": 7,
+    }
+    numpy_row = {
+        **row,
+        "total": np.int64(3),
+        "rank": np.int64(1),
+        "source_id": np.int64(7),
+    }
+    canonical = json.dumps(
+        [row],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    expected = hashlib.sha256(canonical).hexdigest()
+
+    assert candidate_pool_hash([row]) == expected
+    assert candidate_pool_hash([numpy_row]) == expected
 
 
 def test_builds_four_groups_with_stable_ranks_and_average_percentiles():
@@ -152,10 +183,15 @@ def test_rejects_invalid_frozen_candidate_pool():
         build_experiment_decisions("run-1", missing, _agent_result(), final_count=3)
 
 
-def _run_row(run_id: str, candidate_count: int = 1, final_count: int = 1) -> dict:
+def _run_row(
+    run_id: str,
+    candidate_count: int = 1,
+    final_count: int = 1,
+    as_of: str = AS_OF,
+) -> dict:
     return {
         "run_id": run_id,
-        "as_of": AS_OF,
+        "as_of": as_of,
         "data_cutoff_at": "2026-08-04T15:30:00+08:00",
         "status": "running",
         "strategy_name": "test",
@@ -194,8 +230,10 @@ def _pending_decisions(run_id: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=_DECISION_COLUMNS)
 
 
-def _seed_experiment(store: Store, run_id: str = "r1") -> None:
-    store.record_experiment(_run_row(run_id), _pending_decisions(run_id))
+def _seed_experiment(
+    store: Store, run_id: str = "r1", as_of: str = AS_OF
+) -> None:
+    store.record_experiment(_run_row(run_id, as_of=as_of), _pending_decisions(run_id))
 
 
 def _seed_calendar(store: Store, sessions: list[str] = SESSIONS) -> None:
@@ -252,6 +290,15 @@ def test_backfill_uses_next_open_for_entry_and_market_session_targets(tmp_path):
             keys=("ts_code", "trade_date"),
         )
 
+        pending_calls = 0
+        original_pending = store.pending_experiment_decisions
+
+        def tracked_pending():
+            nonlocal pending_calls
+            pending_calls += 1
+            return original_pending()
+
+        store.pending_experiment_decisions = tracked_pending
         summary = backfill_experiment_returns(store)
         saved = _saved(store)
 
@@ -265,6 +312,52 @@ def test_backfill_uses_next_open_for_entry_and_market_session_targets(tmp_path):
         assert summary.updated == 4
         assert summary.filled == 4
         assert summary.return_filled == 8
+        assert pending_calls == 1
+
+
+def test_required_entry_limit_dates_keeps_old_pending_experiments(tmp_path):
+    with Store(tmp_path / "required-limits.duckdb") as store:
+        _seed_experiment(store, "old", as_of=AS_OF)
+        _seed_experiment(store, "later", as_of=SESSIONS[1])
+        _seed_calendar(store)
+        store.upsert(
+            "daily",
+            pd.DataFrame([_daily_row(SESSIONS[2], ts_code="MARKET.SH")]),
+            keys=("ts_code", "trade_date"),
+        )
+        # 较新批次的 entry 日已经齐全，旧批次仍缺 20260805 的权威涨跌停价。
+        store.upsert(
+            "daily_limit",
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": CODE,
+                        "trade_date": SESSIONS[2],
+                        "up_limit": 11.0,
+                        "down_limit": 9.0,
+                    }
+                ]
+            ),
+            keys=("ts_code", "trade_date"),
+        )
+
+        assert required_entry_limit_dates(store) == [SESSIONS[0]]
+
+        store.upsert(
+            "daily_limit",
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "OTHER.SH",
+                        "trade_date": SESSIONS[0],
+                        "up_limit": 12.0,
+                        "down_limit": 10.0,
+                    }
+                ]
+            ),
+            keys=("ts_code", "trade_date"),
+        )
+        assert required_entry_limit_dates(store) == []
 
 
 def test_backfill_keeps_future_entry_pending(tmp_path):

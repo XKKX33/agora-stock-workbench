@@ -78,12 +78,10 @@ def _validated_scan_rows(scan_rows: Any) -> pd.DataFrame:
         raise ValueError("scan_rows.ts_code 必须唯一")
 
     rows = rows.reset_index(drop=True)
-    rows["total"] = [
-        _finite_number(value, "scan_rows.total") for value in rows["total"]
-    ]
-    rows["rank"] = [
-        _finite_number(value, "scan_rows.rank") for value in rows["rank"]
-    ]
+    for value in rows["total"]:
+        _finite_number(value, "scan_rows.total")
+    for value in rows["rank"]:
+        _finite_number(value, "scan_rows.rank")
     return rows
 
 
@@ -94,18 +92,26 @@ def _json_value(value: Any) -> Any:
         return {str(key): _json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
-    if isinstance(value, bool) or isinstance(value, (str, int)):
-        return value
-    if isinstance(value, Real):
-        number = float(value)
-        if not math.isfinite(number):
-            raise ValueError("候选池包含不可序列化的非有限数")
-        return number
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
     item_method = getattr(value, "item", None)
     if callable(item_method):
         return _json_value(item_method())
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("候选池包含不可序列化的非有限数")
+        return value
+    if isinstance(value, Real):
+        number = float(value)
+        if math.isfinite(number):
+            return number
+        raise ValueError("候选池包含不可序列化的非有限数")
     raise ValueError(f"候选池包含不可序列化值: {type(value).__name__}")
 
 
@@ -128,8 +134,8 @@ def candidate_pool_hash(scan_rows: Any) -> str:
     """对冻结候选池的全部字段做顺序无关 SHA-256 指纹。"""
     rows = _validated_scan_rows(scan_rows)
     records = [
-        {str(column): _json_value(row[column]) for column in rows.columns}
-        for _, row in rows.sort_values("ts_code", kind="mergesort").iterrows()
+        {str(column): _json_value(value) for column, value in row.items()}
+        for row in rows.sort_values("ts_code", kind="mergesort").to_dict("records")
     ]
     payload = json.dumps(
         records,
@@ -332,31 +338,50 @@ def build_experiment_decisions(
     return pool_hash, pd.DataFrame(decisions, columns=_DECISION_COLUMNS)
 
 
-def _pending_experiment_rows(store: Any) -> pd.DataFrame:
-    columns = ", ".join(f"d.{column}" for column in _DECISION_COLUMNS)
-    return store.con.execute(
-        f"""
-        SELECT {columns}, r.as_of
-        FROM experiment_decisions d
-        JOIN experiment_runs r ON r.run_id = d.run_id
-        WHERE r.status = ?
-          AND (
-              d.entry_status IS NULL
-              OR d.entry_status = 'pending_entry'
-              OR (
-                  d.entry_status = 'filled'
-                  AND (
-                      d.ret1_status IS NULL OR d.ret1_status <> 'filled'
-                      OR d.ret3_status IS NULL OR d.ret3_status <> 'filled'
-                      OR d.ret5_status IS NULL OR d.ret5_status <> 'filled'
-                      OR d.ret10_status IS NULL OR d.ret10_status <> 'filled'
-                  )
-              )
-          )
-        ORDER BY d.run_id, d.group_name, d.ts_code
-        """,
-        ["succeeded"],
-    ).df()
+def _run_as_of(store: Any, run_id: str, cache: dict[str, str]) -> str:
+    if run_id not in cache:
+        run = store.experiment_run(run_id)
+        if run is None:
+            raise RuntimeError(f"实验批次不存在: {run_id}")
+        cache[run_id] = run["as_of"]
+    return cache[run_id]
+
+
+def required_entry_limit_dates(store: Any, exchange: str = "SSE") -> list[str]:
+    """列出已到 entry 日、但仍缺权威涨跌停覆盖的历史日期。
+
+    一键编排必须在 ``backfill_experiment_returns`` 前调用本函数，并把结果交给
+    ``ingest_daily_limits``；否则隔日未运行的实验会一直缺历史涨跌停价。
+    """
+    rows = store.pending_experiment_decisions()
+    if rows.empty:
+        return []
+    data_max = store.latest_date()
+    if data_max is None:
+        return []
+
+    needed: set[str] = set()
+    covered_dates: dict[str, bool] = {}
+    run_dates: dict[str, str] = {}
+    pending_entries = rows[
+        rows["entry_status"].isna() | rows["entry_status"].eq("pending_entry")
+    ]
+    for _, row in pending_entries.iterrows():
+        as_of = _run_as_of(store, row["run_id"], run_dates)
+        entry_date = store.sessions_after(exchange, as_of, 1)
+        if entry_date is None or entry_date > data_max:
+            continue
+        if entry_date not in covered_dates:
+            covered_dates[entry_date] = (
+                store.con.execute(
+                    "SELECT 1 FROM daily_limit WHERE trade_date = ? LIMIT 1",
+                    [entry_date],
+                ).fetchone()
+                is not None
+            )
+        if not covered_dates[entry_date]:
+            needed.add(entry_date)
+    return sorted(needed)
 
 
 def _sessions_after(store: Any, exchange: str, as_of: str) -> list[str]:
@@ -459,16 +484,18 @@ def _different(current: Any, desired: Any) -> bool:
 
 def backfill_experiment_returns(store: Any, exchange: str = "SSE") -> BackfillSummary:
     """按信号日后的市场交易日和同一个次日开盘价回填实验收益。"""
-    pending_rows = _pending_experiment_rows(store)
+    pending_rows = store.pending_experiment_decisions()
     if pending_rows.empty:
         return BackfillSummary()
 
     data_max = store.latest_date()
+    run_dates: dict[str, str] = {}
     updated = filled = pending = unavailable = return_filled = 0
 
     for _, row in pending_rows.iterrows():
         ts_code = row["ts_code"]
-        sessions = _sessions_after(store, exchange, row["as_of"])
+        as_of = _run_as_of(store, row["run_id"], run_dates)
+        sessions = _sessions_after(store, exchange, as_of)
         entry_date = sessions[0] if sessions else None
         desired: dict[str, Any] = {"entry_date": entry_date}
 
@@ -568,5 +595,6 @@ __all__ = [
     "BackfillSummary",
     "candidate_pool_hash",
     "build_experiment_decisions",
+    "required_entry_limit_dates",
     "backfill_experiment_returns",
 ]

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -28,6 +29,7 @@ _F_DBASIC = "ts_code,trade_date,turnover_rate,volume_ratio,total_mv,circ_mv"
 _F_MF = ("ts_code,trade_date,net_mf_amount,buy_lg_amount,sell_lg_amount,"
          "buy_elg_amount,sell_elg_amount")
 _F_LIMIT = "ts_code,trade_date,up_limit,down_limit"
+_LIMIT_COLUMNS = ("ts_code", "trade_date", "up_limit", "down_limit")
 
 
 class TushareClient:
@@ -107,19 +109,51 @@ def confirm_latest_trade_date(client: TushareClient, min_rows: int) -> tuple[str
     raise RuntimeError("未找到已收盘确认的最新交易日")
 
 
+def _validated_daily_limits(frame: pd.DataFrame, trade_date: str) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        raise RuntimeError(f"stk_limit {trade_date} 返回空数据")
+    missing = set(_LIMIT_COLUMNS) - set(frame.columns)
+    if missing:
+        raise RuntimeError(
+            f"stk_limit {trade_date} 缺少字段: {sorted(missing)}"
+        )
+    returned_dates = frame["trade_date"].map(str)
+    if frame["trade_date"].isna().any() or not returned_dates.eq(trade_date).all():
+        raise RuntimeError(f"stk_limit {trade_date} 返回了其他交易日数据")
+    return frame.loc[:, _LIMIT_COLUMNS].copy()
+
+
+def ingest_daily_limits(
+    store: Store, client: TushareClient, trade_dates: Iterable[str]
+) -> int:
+    """逐日补采权威涨跌停价；任何一天无效都立即抛错。"""
+    normalized: set[str] = set()
+    for value in trade_dates:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("trade_dates 必须包含非空日期字符串")
+        normalized.add(value.strip())
+
+    total = 0
+    for trade_date in sorted(normalized):
+        frame = _validated_daily_limits(client.stk_limit(trade_date), trade_date)
+        total += store.upsert(
+            "daily_limit", frame, keys=("ts_code", "trade_date")
+        )
+    return total
+
+
 def ingest_snapshot(store: Store, client: TushareClient, as_of: str) -> dict:
     """摄取某交易日的全市场截面(daily + basic + daily_basic)。"""
     daily = client.daily(trade_date=as_of)
     basic = client.stock_basic()
     dbasic = client.daily_basic(trade_date=as_of)
-    daily_limit = client.stk_limit(trade_date=as_of)
+
+    # 与历史补采共用同一入口，涨跌停价无效时不把截面误报为成功。
+    n_daily_limit = ingest_daily_limits(store, client, [as_of])
 
     n_daily = store.upsert("daily", daily, keys=("ts_code", "trade_date"))
     n_basic = store.upsert("stock_basic", basic, keys=("ts_code",))
     n_dbasic = store.upsert("daily_basic", dbasic, keys=("ts_code", "trade_date"))
-    n_daily_limit = store.upsert(
-        "daily_limit", daily_limit, keys=("ts_code", "trade_date")
-    )
     return {
         "daily": n_daily,
         "stock_basic": n_basic,

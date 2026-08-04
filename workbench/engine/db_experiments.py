@@ -389,10 +389,18 @@ class ExperimentMixin:
                   OR (
                       d.entry_status = 'filled'
                       AND (
-                          d.ret1_status IS NULL OR d.ret1_status = 'future_not_reached'
-                          OR d.ret3_status IS NULL OR d.ret3_status = 'future_not_reached'
-                          OR d.ret5_status IS NULL OR d.ret5_status = 'future_not_reached'
-                          OR d.ret10_status IS NULL OR d.ret10_status = 'future_not_reached'
+                          d.ret1_status IS NULL OR d.ret1_status IN (
+                              'future_not_reached', 'calendar_missing', 'target_bar_missing'
+                          )
+                          OR d.ret3_status IS NULL OR d.ret3_status IN (
+                              'future_not_reached', 'calendar_missing', 'target_bar_missing'
+                          )
+                          OR d.ret5_status IS NULL OR d.ret5_status IN (
+                              'future_not_reached', 'calendar_missing', 'target_bar_missing'
+                          )
+                          OR d.ret10_status IS NULL OR d.ret10_status IN (
+                              'future_not_reached', 'calendar_missing', 'target_bar_missing'
+                          )
                       )
                   )
               )

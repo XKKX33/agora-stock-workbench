@@ -481,3 +481,47 @@ def test_pending_decisions_returns_rows_awaiting_entry_or_returns(tmp_path):
             )
 
         assert store.pending_experiment_decisions().empty
+
+
+def test_pending_decisions_uses_one_retryable_status_contract(tmp_path):
+    with Store(tmp_path / "pending-statuses.duckdb") as store:
+        store.record_experiment(_run_row("statuses"), _decisions("statuses"))
+        updates = {
+            "rule": {
+                "entry_status": "filled",
+                "ret1_status": "calendar_missing",
+                "ret3_status": None,
+                "ret5_status": "filled",
+                "ret10_status": "filled",
+            },
+            "ai": {
+                "entry_status": "filled",
+                "ret1_status": "target_bar_missing",
+                "ret3_status": "filled",
+                "ret5_status": "filled",
+                "ret10_status": "filled",
+            },
+            "hybrid": {
+                "entry_status": "filled",
+                "ret1_status": "filled",
+                "ret3_status": "filled",
+                "ret5_status": "filled",
+                "ret10_status": "filled",
+            },
+            "benchmark": {
+                "entry_status": "entry_unavailable",
+                "ret1_status": "future_not_reached",
+                "ret3_status": "calendar_missing",
+                "ret5_status": "target_bar_missing",
+                "ret10_status": None,
+            },
+        }
+        decisions = store.experiment_decisions("statuses")
+        for _, row in decisions.iterrows():
+            store.update_experiment_decision(
+                "statuses", row["group_name"], row["ts_code"], **updates[row["group_name"]]
+            )
+
+        pending = store.pending_experiment_decisions()
+
+    assert set(pending["group_name"]) == {"rule", "ai"}
