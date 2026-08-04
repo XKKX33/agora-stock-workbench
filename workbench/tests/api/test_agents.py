@@ -23,7 +23,7 @@ def test_agents_status_reports_not_available(client):
     assert response.status_code == 200
     payload = response.json()
     # 默认已启用但没有凭据，必须明确报告 unconfigured。
-    assert payload["availability"] in {"disabled", "unconfigured"}
+    assert payload["availability"] == "unconfigured"
     assert payload["availability"] != "available"
     assert payload["agent_enabled"] is True
     assert payload["defaults"]["candidates"] > 0
@@ -39,7 +39,7 @@ def test_agents_judge_fails_loudly_when_unconfigured(client):
 
     assert response.status_code == 503
     error = response.json()["error"]
-    assert error["code"] in {"agent_disabled", "agent_unconfigured"}
+    assert error["code"] == "agent_unconfigured"
     assert error["message"]
     assert error["details"]["availability"] != "available"
 
