@@ -220,12 +220,27 @@ def parse_json_response(text: str) -> dict:
     return parsed
 
 
-def _num(value: Any, default: float = 0.0) -> float:
+def _score(value: Any, field: str) -> float:
+    """把模型给的评分解析成 0~100 的数,**解析不了就上抛**,不给默认值。
+
+    原实现缺失时默认 0.0。0 分不是"没打分",它是最低分:三位分析师
+    加权后 total <= 40 会被判成 stance="bearish",风控段 verdict 会写
+    "看空"。也就是说模型漏了一个字段,页面上就出现一条看空结论——
+    这跟本项目在 IC IR / 市场结构上修掉的是同一类问题:算不出被讲成了结论。
+    方向相反(把结果说差)不构成例外,看空同样是可执行的建议。
+
+    本文件其余地方对模型输出一律硬失败(_call 把单个分析师的异常整批上抛、
+    parse_json_response 解析不了直接抛),这里跟上同一口径。
+    """
     try:
         num = float(value)
     except (TypeError, ValueError):
-        return default
-    return num if num == num else default  # NaN 按缺失处理
+        raise AgentOutputError(
+            f"模型没有给出可解析的 {field}: {value!r}"
+        ) from None
+    if num != num:  # NaN
+        raise AgentOutputError(f"模型给出的 {field} 是 NaN")
+    return min(100.0, max(0.0, num))
 
 
 def _text(value: Any, default: str = "") -> str:
@@ -282,7 +297,7 @@ def _analyze_one(
 
     def _parse(name: str) -> tuple[float, str, list, list]:
         data = results.get(name) or {}
-        score = min(100.0, max(0.0, _num(data.get("score"))))
+        score = _score(data.get("score"), f"{name} 分析师的 score")
         stance = _text(data.get("stance"), "neutral")
         if stance not in ("bullish", "neutral", "bearish"):
             stance = "neutral"
@@ -351,7 +366,7 @@ def _debate_one(
     )
     final = parse_json_response(raw_final)
 
-    score = min(100.0, max(0.0, _num(final.get("score"))))
+    score = _score(final.get("score"), "最终决策人的 score")
     verdict = _text(final.get("verdict"), "中性")
     if verdict not in ("看多", "中性", "看空"):
         verdict = "中性"

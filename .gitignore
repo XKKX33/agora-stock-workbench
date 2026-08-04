@@ -35,6 +35,9 @@ __pycache__/
 # 服务日志
 *.log
 
+# 收盘流水线导出的单次运行结果
+workbench/pipeline_*.json
+
 # 训练产物
 workbench/data/models/
 out/

@@ -38,6 +38,44 @@ PowerShell 中直接把 `foreach` 语句接到管道导致解析失败。
 
 ---
 
+## [ERR-20260804-010] powershell-nested-regex-quoting
+
+**Logged**: 2026-08-04T12:30:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: infra
+
+### Summary
+
+在一个并行命令中内嵌带单双引号的敏感信息正则，PowerShell 解析失败。
+
+### Error
+
+```text
+The string is missing the terminator: ".
+```
+
+### Context
+
+- 全量测试与敏感信息检查被放在同一次并行调用中。
+- 敏感信息正则同时包含单双引号，经过 JSON、JavaScript 和 PowerShell 三层解析后失去结束引号。
+
+### Suggested Fix
+
+复杂正则先存入 PowerShell 单引号变量，测试命令与扫描命令分开运行。
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: none
+
+### Resolution
+
+- **Resolved**: 2026-08-04T12:31:00+08:00
+- **Notes**: 后续验证拆成独立命令，不再嵌套多层引号。
+
+---
+
 ## [ERR-20260731-002] missing-duckdb-dependency
 
 **Logged**: 2026-07-31T16:25:00+08:00

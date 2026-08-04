@@ -474,6 +474,27 @@ def test_run_single_full_flow():
     assert "deep" in stages and "debate" in stages and "done" in stages
 
 
+def test_run_single_rejects_missing_final_score():
+    responses = _full_flow_responses()
+    responses["最终决策人"] = json.dumps(
+        {
+            "verdict": "看多",
+            "thesis": "情绪启动+资金确认",
+            "risks": ["大盘回调"],
+            "action": "回踩低吸",
+        },
+        ensure_ascii=False,
+    )
+
+    with pytest.raises(AgentOutputError, match="最终决策人的 score"):
+        run_single(
+            FakeClient(responses),
+            AgentConfig(),
+            as_of="20260803",
+            snapshot=_loader("000001.SZ"),
+        )
+
+
 def test_run_single_fails_on_empty_snapshot():
     from engine.agents import AgentOutputError
     client = FakeClient(_full_flow_responses())
