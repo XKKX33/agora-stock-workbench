@@ -288,7 +288,55 @@ def test_cross_section_ic_is_per_day():
     ic_mean, ic_ir, daily = M.cross_section_ic(pd.DataFrame(rows))
     _check("逐日 IC 均值 = 1.0", abs(ic_mean - 1.0) < 1e-9)
     _check("每日明细各 5 个样本", [d["n"] for d in daily] == [5, 5])
-    _check("IC 无波动时 IR 为 None(一致地好不叫不稳定)", ic_ir is None)
+    # 这里 IR 为 None 是因为只有两天(不够 MIN_DAYS_FOR_IC_IR),
+    # 不是因为 IC 无波动——两个原因都会给 None,别把它当成后者的证据。
+    _check("两天算不出 IR", ic_ir is None)
+
+
+def test_ic_ir_needs_enough_days_not_enough_samples():
+    """天数不够就不给 IC IR,哪怕每天的横截面很宽。
+
+    这条钉的是一个真实缺陷:旧实现只要 >= 2 天就给值,而 IR 的分母是
+    IC 的**跨日**标准差,两三天算出来的标准差偏小,IR 会虚高到 4~5
+    ——真实股票因子的 IC IR 大致在 0.5 量级,4.8 只可能是天数太少的假象。
+    样本数再多也补不了天数:分母数的是天,不是行。
+    """
+    def _frame(n_days: int) -> pd.DataFrame:
+        # 固定种子:逐日加不同噪声,让**日 IC 本身有波动**(算得出非零标准差)。
+        # 若日内完全同序,每天 IC 都是 1.0、标准差为 0,那样 IR 为 None 是
+        # "无波动"而不是"天数不够",就钉不住这条规则了。
+        rng = np.random.RandomState(11)
+        rows = []
+        for day in range(n_days):
+            for k in range(30):
+                rows.append({
+                    "as_of": f"202501{day + 1:02d}",
+                    "pred": float(k),
+                    "label": 0.01 * k + rng.normal(0.0, 0.08),
+                })
+        return pd.DataFrame(rows)
+
+    three = M.cross_section_ic(_frame(3))
+    four = M.cross_section_ic(_frame(4))
+
+    _check("3 天(90 行)不给 IR", three[1] is None)
+    _check("3 天仍给 IC 均值", three[0] is not None)
+    _check("4 天给 IR", four[1] is not None)
+    # 日 IC 确实有波动,否则上一条是"无波动"通过的,不是"天数够"通过的
+    ic_values = [d["ic"] for d in four[2] if d["ic"] is not None]
+    _check("四天的日 IC 不全相等", len(set(ic_values)) > 1)
+    # 分母是样本标准差(ddof=1)。ddof=0 会把分母算小、IR 算大,
+    # 偏差方向恰好是"看起来更好"的那一侧,所以要逐位钉住。
+    expected = float(np.mean(ic_values) / np.std(ic_values, ddof=1))
+    _check("IR 用 ddof=1 的标准差", abs(four[1] - expected) < 1e-6)
+
+    _, ir_short, daily_short = M.cross_section_ic(_frame(M.MIN_DAYS_FOR_IC_IR - 1))
+    _check("差一天就不给 IR", ir_short is None)
+    _check("但每日明细照给(不给值不等于不展示)",
+           len(daily_short) == M.MIN_DAYS_FOR_IC_IR - 1)
+
+    _, ir_ok, _ = M.cross_section_ic(_frame(M.MIN_DAYS_FOR_IC_IR))
+    _check("够天数就给 IR", ir_ok is not None)
 
 
 def test_evaluate_predictions_excludes_nan_labels():

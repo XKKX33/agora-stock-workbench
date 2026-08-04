@@ -23,6 +23,11 @@ import pandas as pd
 
 MIN_CROSS_SECTION = 3  # 单日横截面最少样本数,低于此 IC 无意义
 
+# IC IR 至少要这么多个有效交易日才给值。与 postmortem.MIN_DAYS_FOR_IC_IR 同值同理:
+# IR 的分母是 IC 的跨日标准差,2~3 天算出来的标准差没有统计意义且偏小,
+# 会把 IR 顶到 4~5 这种股票因子上不可能的量级(真实大致在 0.5 上下)。
+MIN_DAYS_FOR_IC_IR = 4
+
 
 def _clean_pair(a: pd.Series, b: pd.Series) -> pd.DataFrame:
     return pd.DataFrame({"a": pd.to_numeric(a, errors="coerce"),
@@ -54,8 +59,10 @@ def cross_section_ic(
     返回 (IC均值, IC_IR, 每日明细)。逐日算再平均是必须的——把多日样本混在
     一起算一个大相关系数,会把"不同日期的整体涨跌差异"混进来,那不是选股能力。
 
-    IC_IR = mean(IC) / std(IC),衡量 IC 的稳定性;只有一个有效交易日时为 None
-    (一天的样本谈不上"稳定性")。
+    IC_IR = mean(IC) / std(IC),衡量 IC 的稳定性。有效交易日少于
+    MIN_DAYS_FOR_IC_IR 天时为 None——几天的样本谈不上"稳定性",
+    而且天数少时标准差偏小,IR 会虚高到不可能的量级。
+    标准差用 ddof=1:这些交易日是总体的一个样本,不是总体本身。
     """
     if frame is None or frame.empty:
         return None, None, []
@@ -77,8 +84,8 @@ def cross_section_ic(
         return None, None, daily
     ic_mean = float(valid.mean())
     ic_ir: Optional[float] = None
-    if valid.size > 1:
-        std = float(valid.std(ddof=0))
+    if valid.size >= MIN_DAYS_FOR_IC_IR:
+        std = float(valid.std(ddof=1))
         if std > 1e-12:
             ic_ir = float(ic_mean / std)
     return ic_mean, ic_ir, daily

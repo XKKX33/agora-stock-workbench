@@ -33,6 +33,13 @@ from .db import Store
 # 回填的收益期限：列名 -> 未来第 N 个交易日
 HORIZONS: Dict[str, int] = {"ret1": 1, "ret3": 3, "ret5": 5, "ret10": 10}
 
+# IC IR 至少要这么多个交易日才给值。
+# 理由:IR 的分母是 IC 的**跨日**标准差,2~3 天算出来的标准差没有统计意义,
+# 而且它偏小,会把 IR 顶到 4~5 这种在股票因子上根本不可能的数量级
+# (真实股票因子的 IC IR 大致在 0.5 上下)。给了就会被当成结论。
+# 与 backtest.MIN_PERIODS_FOR_SHARPE 同样取 4,理由相同:都是"均值/波动"型指标。
+MIN_DAYS_FOR_IC_IR = 4
+
 
 @dataclass
 class BackfillReport:
@@ -146,9 +153,10 @@ def _ic(scores: pd.Series, rets: pd.Series, method: str) -> float:
 class HorizonStats:
     horizon: str
     n_samples: int
+    n_days: int             # 有效交易日数(IC 是逐日算的,样本数不等于它)
     ic_mean: float          # 各交易日横截面 Pearson IC 的均值
     rank_ic_mean: float     # 各交易日 RankIC(Spearman) 的均值
-    ic_ir: float            # IC 均值 / IC 标准差(信息比率)
+    ic_ir: float            # IC 均值 / IC 跨日标准差(信息比率),日数不足时 NaN
     win_rate: float
     profit_factor: float
     avg_ret: float
@@ -204,15 +212,19 @@ def evaluate(store: Store, strategy: Optional[str] = None) -> List[HorizonStats]
         rank_arr = np.array([x for x in rank_ics if x == x])
         ic_mean = float(ic_arr.mean()) if ic_arr.size else float("nan")
         rank_ic_mean = float(rank_arr.mean()) if rank_arr.size else float("nan")
+        # 分母用样本标准差(ddof=1):这些交易日是总体的一个样本,不是总体本身。
+        # ddof=0 会把分母算小、IR 算大,偏差方向恰好是"看起来更好"的那一侧。
+        ic_std = float(ic_arr.std(ddof=1)) if ic_arr.size > 1 else float("nan")
         ic_ir = (
-            float(ic_arr.mean() / ic_arr.std())
-            if ic_arr.size > 1 and ic_arr.std() > 1e-12
+            float(ic_mean / ic_std)
+            if ic_arr.size >= MIN_DAYS_FOR_IC_IR and ic_std > 1e-12
             else float("nan")
         )
 
         stats.append(HorizonStats(
             horizon=col,
             n_samples=int(len(sample)),
+            n_days=int(ic_arr.size),
             ic_mean=ic_mean,
             rank_ic_mean=rank_ic_mean,
             ic_ir=ic_ir,
@@ -234,6 +246,9 @@ def stats_as_dict(s: HorizonStats) -> dict:
     return {
         "horizon": s.horizon,
         "n_samples": s.n_samples,
+        # n_days 必须跟着 ic_ir 一起下发:IR 是"跨交易日"的稳定性指标,
+        # 只看 n_samples(横截面样本数)判断不了它有几个点撑着。
+        "n_days": s.n_days,
         "ic_mean": round(s.ic_mean, 4) if s.ic_mean == s.ic_mean else None,
         "rank_ic_mean": round(s.rank_ic_mean, 4) if s.rank_ic_mean == s.rank_ic_mean else None,
         "ic_ir": round(s.ic_ir, 4) if s.ic_ir == s.ic_ir else None,

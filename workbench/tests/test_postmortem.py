@@ -27,7 +27,7 @@ if _ENGINE_PARENT not in sys.path:
 
 from engine.db import Store  # noqa: E402
 from engine.postmortem import (  # noqa: E402
-    backfill_returns, evaluate, run_postmortem, HORIZONS,
+    backfill_returns, evaluate, run_postmortem, stats_as_dict, HORIZONS,
 )
 
 
@@ -288,6 +288,19 @@ def test_evaluate_metrics():
                    s5.layer_avg["rank1"] > s5.layer_avg["rank4plus"])
             print("    ret5 RankIC:", round(s5.rank_ic_mean, 3),
                   "分层:", {k: round(v, 3) for k, v in s5.layer_avg.items()})
+
+            # 只有两个选股日 -> 给不出 IC IR。这条是从真实运行里发现的缺陷:
+            # 旧实现 >= 2 天就给值,曾在 11 个样本上报出 ic_ir = 4.8628,
+            # 而真实股票因子的 IC IR 大致在 0.5 量级 —— 4.8 只是天数太少
+            # 导致跨日标准差偏小的假象,却会被当成"这因子极稳"的结论。
+            _check("两天给不出 IC IR", s5.ic_ir != s5.ic_ir)  # NaN
+            _check("但 n_days 如实报 2", s5.n_days == 2)
+            _check("IC 均值照给(不给 IR 不等于什么都不给)",
+                   s5.ic_mean == s5.ic_mean)
+            payload = stats_as_dict(s5)
+            _check("下发时 ic_ir 为 None", payload["ic_ir"] is None)
+            _check("下发时带 n_days,让人能自己判断这个数值不值得信",
+                   payload["n_days"] == 2)
 
 
 def test_suspended_stock_uses_market_calendar():

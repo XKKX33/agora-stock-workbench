@@ -123,7 +123,11 @@ function renderMetricCards(metrics, diag) {
   const gap = diag.overfit_gap ?? metrics.overfit_gap;
   const cards = [
     metricCard("样本外 IC", metrics.ic_mean, 4, "排序相关性,越高越好", signOf(metrics.ic_mean)),
-    metricCard("IC 信息比", metrics.ic_ir, 3, "IC 均值 / 波动,稳定性", signOf(metrics.ic_ir)),
+    // 天数写进注脚:IR 的分母是 IC 的跨日标准差,天数少时它偏小、IR 虚高,
+    // 所以这个数值必须和"算了几天"一起看,不能单独摆出来。
+    metricCard("IC 信息比", metrics.ic_ir, 3,
+      metrics.n_days == null ? "IC 均值 / 波动,稳定性" : `IC 均值 / 波动,基于 ${metrics.n_days} 个交易日`,
+      signOf(metrics.ic_ir)),
     metricCard("AUC", metrics.auc, 4, "0.5 = 无区分度", metrics.auc == null ? "" : Number(metrics.auc) > 0.5 ? "positive" : "negative"),
     metricCard("过拟合缺口", gap, 4, "训练 IC − 样本外 IC", gap == null ? "" : Number(gap) > 0.1 ? "negative" : "positive"),
   ];

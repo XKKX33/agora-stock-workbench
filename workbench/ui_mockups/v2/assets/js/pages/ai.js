@@ -32,7 +32,8 @@ const KEY_LABELS = {
   fetched_at: "抓取时间", sentiment: "情绪", sentiment_score: "情绪分", credibility: "可信度",
   event_type: "事件类型", duplicate_of: "重复条目", backfill: "收益回填", pending: "待回填",
   pending_reasons: "待回填原因", stats: "样本统计", mode: "模式", horizon: "持有期",
-  n_samples: "样本数", ic_mean: "IC 均值", rank_ic_mean: "秩 IC 均值", ic_ir: "IC IR",
+  n_samples: "样本数", n_days: "有效交易日", ic_mean: "IC 均值",
+  rank_ic_mean: "秩 IC 均值", ic_ir: "IC IR",
   win_rate: "胜率", profit_factor: "盈亏比", avg_ret: "平均收益", median_ret: "中位收益",
   layer_avg: "分层均值", filled: "已回填", needs_attention: "待处理", total_filled: "累计回填",
 };
