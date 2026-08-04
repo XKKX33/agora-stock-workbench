@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS daily (
     amount     DOUBLE,
     PRIMARY KEY (ts_code, trade_date)
 );
+CREATE TABLE IF NOT EXISTS daily_limit (
+    ts_code    VARCHAR,
+    trade_date VARCHAR,
+    up_limit   DOUBLE,
+    down_limit DOUBLE,
+    PRIMARY KEY (ts_code, trade_date)
+);
 CREATE TABLE IF NOT EXISTS daily_basic (
     ts_code       VARCHAR,
     trade_date    VARCHAR,
@@ -215,6 +222,62 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     metrics_json VARCHAR,              -- {{total_return, max_drawdown, win_rate, ic, sharpe,...}}
     equity_json  VARCHAR,              -- [{{date, nav}}]
     created_at   VARCHAR               -- ISO8601
+);
+
+-- 一键流程实验批次：配置一经成功落库便不可覆盖
+CREATE TABLE IF NOT EXISTS experiment_runs (
+    run_id              VARCHAR PRIMARY KEY,
+    as_of               VARCHAR,
+    data_cutoff_at      VARCHAR,
+    status              VARCHAR,
+    strategy_name       VARCHAR,
+    strategy_version    VARCHAR,
+    model               VARCHAR,
+    temperature         DOUBLE,
+    prompt_version      VARCHAR,
+    candidate_hash      VARCHAR,
+    candidate_count     INTEGER,
+    final_count         INTEGER,
+    hybrid_rule_weight  DOUBLE,
+    hybrid_ai_weight    DOUBLE,
+    created_at          VARCHAR,
+    finished_at         VARCHAR,
+    error_json          VARCHAR
+);
+-- 四组实验明细：收益及状态保持 NULL，直到真实市场数据可用
+CREATE TABLE IF NOT EXISTS experiment_decisions (
+    run_id             VARCHAR,
+    group_name         VARCHAR,
+    ts_code            VARCHAR,
+    name               VARCHAR,
+    industry           VARCHAR,
+    rank               INTEGER,
+    rule_score         DOUBLE,
+    ai_score           DOUBLE,
+    hybrid_score       DOUBLE,
+    reason_json        VARCHAR,
+    risk_json          VARCHAR,
+    entry_date         VARCHAR,
+    entry_price        DOUBLE,
+    entry_status       VARCHAR,
+    entry_reason       VARCHAR,
+    ret1               DOUBLE,
+    ret1_target_date   VARCHAR,
+    ret1_status        VARCHAR,
+    ret1_reason        VARCHAR,
+    ret3               DOUBLE,
+    ret3_target_date   VARCHAR,
+    ret3_status        VARCHAR,
+    ret3_reason        VARCHAR,
+    ret5               DOUBLE,
+    ret5_target_date   VARCHAR,
+    ret5_status        VARCHAR,
+    ret5_reason        VARCHAR,
+    ret10              DOUBLE,
+    ret10_target_date  VARCHAR,
+    ret10_status       VARCHAR,
+    ret10_reason       VARCHAR,
+    PRIMARY KEY (run_id, group_name, ts_code)
 );
 
 -- 多 agent 短线研判:每次研判一个批次(粗筛/深度学习/辩论/最终)

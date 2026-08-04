@@ -29,6 +29,7 @@ from typing import Iterable, Optional
 import duckdb
 import pandas as pd
 
+from .db_experiments import ExperimentMixin
 from .db_news import NewsAgentMixin
 from .schema import _PICKS_SCHEMA, _SCHEMA
 
@@ -51,7 +52,7 @@ def _is_stale(last_seen: Optional[str], now: str, stale_after_seconds: int) -> b
     return (b - a).total_seconds() > stale_after_seconds
 
 
-class Store(NewsAgentMixin):
+class Store(ExperimentMixin, NewsAgentMixin):
     """DuckDB 连接封装。用作上下文管理器,自动关闭。
 
     ensure_schema:
