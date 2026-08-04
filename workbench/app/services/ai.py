@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from engine.ai import AIUnavailableError, describe, load_ai_config, narrate_review
-from engine.config import load_settings
+from engine.config import load_settings_with_local
 
 from app.errors import WorkbenchError
 from app.repositories.market import MarketRepository
@@ -19,7 +19,7 @@ from app.services.reviews import ReviewService
 class AIService:
     def __init__(self, repository: MarketRepository) -> None:
         self.repository = repository
-        self.config = load_ai_config(load_settings())
+        self.config = load_ai_config(load_settings_with_local())
 
     def status(self) -> dict:
         """AI 可用性。页面据此显示"未配置"而不是留白。"""

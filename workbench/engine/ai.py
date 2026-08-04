@@ -99,13 +99,21 @@ class OpenAICompatibleClient:
       可降级重试(提示词约束 JSON)。
     """
 
-    def __init__(self, config: AIConfig) -> None:
+    def __init__(
+        self,
+        config: AIConfig,
+        *,
+        transport: Optional["httpx.BaseTransport"] = None,
+    ) -> None:
         if httpx is None:
             raise AIUnavailableError("httpx 未安装,无法发起模型请求")
         self.config = config
         base = (config.base_url or "").rstrip("/")
         self.endpoint = f"{base}/chat/completions"
-        self._client = httpx.Client(timeout=httpx.Timeout(180.0, connect=15.0))
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(180.0, connect=15.0),
+            transport=transport,
+        )
 
     def chat(
         self,

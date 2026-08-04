@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,11 +23,14 @@ from engine.ai import (  # noqa: E402
     AIConfig,
     AIConfigError,
     AIUnavailableError,
+    OpenAICompatibleClient,
     build_narrator,
     describe,
     load_ai_config,
     narrate_review,
 )
+from engine.config import load_settings  # noqa: E402
+import app.services.ai as ai_service_module  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -67,6 +72,38 @@ def test_blank_fields_become_none():
 def test_api_key_env_defaults():
     config = load_ai_config({"ai": {}})
     assert config.api_key_env == "WORKBENCH_AI_API_KEY"
+
+
+def test_default_settings_enable_deepseek_without_storing_secret():
+    settings = load_settings()
+
+    assert settings["ai"] == {
+        "enabled": True,
+        "provider": "openai_compatible",
+        "base_url": "https://api.pie-xian.com/v1",
+        "api_key_env": "WORKBENCH_AI_API_KEY",
+        "model": "deepseekv4flash",
+    }
+    assert settings["agent"]["enabled"] is True
+    assert "api_key" not in settings["ai"]
+
+
+def test_ai_service_uses_local_settings(monkeypatch):
+    merged = {
+        "ai": {
+            "enabled": False,
+            "provider": "openai_compatible",
+            "base_url": "https://local.example/v1",
+            "api_key_env": ENV_KEY,
+            "model": "local-model",
+        }
+    }
+    monkeypatch.setattr(ai_service_module, "load_settings_with_local", lambda: merged)
+
+    service = ai_service_module.AIService(repository=None)
+
+    assert service.config.model == "local-model"
+    assert service.config.base_url == "https://local.example/v1"
 
 
 # ---------------------------------------------------------------- 可用性自述
@@ -116,6 +153,45 @@ def test_registry_has_openai_compatible():
 
 
 # ---------------------------------------------------------------- 调用行为
+
+
+def test_openai_client_uses_deepseek_request_contract(monkeypatch):
+    seen = {}
+
+    def capture_ok(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.update(
+            url=str(request.url),
+            model=body["model"],
+            authorized=request.headers.get("Authorization") == "Bearer fake-api-key",
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    monkeypatch.setenv(ENV_KEY, "fake-api-key")
+    client = OpenAICompatibleClient(
+        AIConfig(
+            enabled=True,
+            provider="openai_compatible",
+            model="deepseekv4flash",
+            base_url="https://api.pie-xian.com/v1",
+            api_key_env=ENV_KEY,
+        ),
+        transport=httpx.MockTransport(capture_ok),
+    )
+
+    try:
+        assert client.chat([{"role": "user", "content": "ping"}]) == "ok"
+    finally:
+        client.close()
+
+    assert seen == {
+        "url": "https://api.pie-xian.com/v1/chat/completions",
+        "model": "deepseekv4flash",
+        "authorized": True,
+    }
 
 
 def test_narrate_without_config_raises_not_fake_text(monkeypatch):

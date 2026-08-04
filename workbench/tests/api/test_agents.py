@@ -1,7 +1,7 @@
 ﻿"""多 agent 研判 API 测试。
 
-夹具环境 settings.yaml 里 agent.enabled=false（且无凭据），因此锁的是
-"未配置时如实报告、发起研判返回 409 而不是编结果"。
+夹具环境使用默认 agent.enabled=true（且无凭据），因此锁的是
+"未配置时如实报告、发起研判返回 503 而不是编结果"。
 
 运行:
     cd workbench
@@ -22,16 +22,16 @@ def test_agents_status_reports_not_available(client):
 
     assert response.status_code == 200
     payload = response.json()
-    # 未启用时 availability=disabled；打开但缺配置则是 unconfigured。都不是 available。
+    # 默认已启用但没有凭据，必须明确报告 unconfigured。
     assert payload["availability"] in {"disabled", "unconfigured"}
     assert payload["availability"] != "available"
-    assert payload["agent_enabled"] is False
+    assert payload["agent_enabled"] is True
     assert payload["defaults"]["candidates"] > 0
     assert payload["limits"]["max_candidates"] >= payload["defaults"]["candidates"]
 
 
-def test_agents_judge_fails_loudly_when_disabled(client):
-    """未启用/未配置时返回 503，不能假装开始跑。"""
+def test_agents_judge_fails_loudly_when_unconfigured(client):
+    """缺少凭据时返回 503，不能假装开始跑。"""
     response = client.post(
         "/api/agents/judge",
         json={"candidates": 10, "depth": 4, "final": 2},
