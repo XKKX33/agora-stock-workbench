@@ -371,3 +371,18 @@
 - 全量回归：**431 passed / 0 failed**（429 → +1 夏普 +1 IC IR）。
 - 已有的 `test_ml.py:291`「IC 无波动时 IR 为 None」这条仍通过，但**通过的原因变了**：那个 fixture 只有两天，现在先被天数闸门拦下。断言留着，注释改成如实说明——两个原因都会给 None，别把它当成"无波动"那条的证据。
 - 起过一条 `test_ic_ir_uses_sample_std_not_population_std`，写完发现 fixture 本身是错的：按天缩放 label 不改变日内相关性，四天的日 IC 全是 1.0、标准差为 0，断言会在 `None` 上炸。已删，`ddof=1` 由上面那条在真有波动的日 IC 上钉住。
+
+## 2026-08-03 第十四阶段："没数据"被讲成了对大盘的判断
+
+同一类缺陷继续往服务层查。`app/services/analytics.py` 的 `_market_stage` 按初筛通过率给市场定性，空明细行时 `passed_ratio` 记 `0.0`，`0.0 < 0.15`，于是页面显示**结构偏弱**——扫描一只都没扫出来，被渲染成了对大盘的结论。
+
+`if len(rows)` 这个守卫说明作者预见到了空表，缺陷在于兜底给的是 `0.0` 而不是"算不出"。空表真实可达：`latest_scan_rows()` 只在**没有任何 run** 时抛 404，run 有行而 `scan_rows` 为空是另一回事（初筛全否、或 `record=False` 只留了表头）。
+
+改成与同文件 `_industry_moneyflow` / `_return_summary` 一个口径：空表或缺 `passed` 列时返回 `availability="unavailable"`、`label=None`、`passed_ratio=None`、`reason`；有数据时照常给结论，并补 `sample_count`——一个结论建立在多少只股票上，是判断它有多重的必要信息。
+
+麻烦的地方是**通过率 0% 和"一只都没扫出来"在数值上没法区分**，只能靠 `availability` 分开。所以测试里专门有一条对照：`passed=[False, False]` 要给 `available` + `结构偏弱`，证明新加的 `unavailable` 没把正常的 0% 一起误伤。
+
+前端两个消费方都改了。`sentiment.js` 原来是 `textContent = data.market_stage.label`，`label` 变 `None` 会直接渲染成空白（比"结构偏弱"好，但仍然看不出为什么），抽出 `renderMarketStage()`：算不出显示"算不出"+原因，算得出显示结论+样本数；`p2_sentiment.html` 的 `metric-note` 加了 `id` 才能被写。`news.js` 概览卡原来 `stage.label || "—"`，改成"算不出"并在 note 里带出 `reason`。
+
+### 验证
+- 全量回归：**433 passed / 0 failed**（431 → +2）。

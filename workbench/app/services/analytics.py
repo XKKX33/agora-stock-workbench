@@ -216,14 +216,36 @@ class AnalyticsService:
 
     @staticmethod
     def _market_stage(rows: pd.DataFrame) -> dict:
-        passed_ratio = float(rows["passed"].mean()) if len(rows) else 0.0
+        """按通过初筛的比例给市场结构定性。没有明细行时**不给结论**。
+
+        原实现空表时把 passed_ratio 记 0.0,落到 < 0.15 这一档,页面上显示
+        "结构偏弱"——那是把"没数据"讲成了对大盘的判断。空表是真实可达的:
+        run 表有行而 scan_rows 为空(初筛全否、或 record=False 只留了表头)。
+
+        算不出就报 availability="unavailable" + label=None,与本文件里
+        _industry_moneyflow / _return_summary 同一口径。
+        """
+        if not len(rows) or "passed" not in rows:
+            return {
+                "availability": "unavailable",
+                "label": None,
+                "passed_ratio": None,
+                "sample_count": 0,
+                "reason": "最新扫描没有明细行,判不出市场结构",
+            }
+        passed_ratio = float(rows["passed"].mean())
         if passed_ratio >= 0.35:
             label = "结构偏强"
         elif passed_ratio >= 0.15:
             label = "结构分化"
         else:
             label = "结构偏弱"
-        return {"label": label, "passed_ratio": passed_ratio}
+        return {
+            "availability": "available",
+            "label": label,
+            "passed_ratio": passed_ratio,
+            "sample_count": int(len(rows)),
+        }
 
     @staticmethod
     def _return_summary(frame: pd.DataFrame, column: str) -> dict:

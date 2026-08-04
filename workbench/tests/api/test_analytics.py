@@ -11,6 +11,47 @@ def test_sentiment_marks_unavailable_fields(client):
     assert news["counts"] is None
 
 
+def test_sentiment_market_stage_reports_sample_count(client):
+    """有明细行时照常给结论,但必须带上样本数,让人能判断这结论有多重。"""
+    stage = client.get("/api/sentiment").json()["market_stage"]
+
+    assert stage["availability"] == "available"
+    assert stage["label"] in {"结构偏强", "结构分化", "结构偏弱"}
+    assert stage["passed_ratio"] is not None
+    assert stage["sample_count"] > 0
+
+
+def test_market_stage_empty_rows_is_unavailable_not_weak():
+    """空明细行不能落到"结构偏弱"那一档——那是把"没数据"讲成了对大盘的判断。
+
+    原实现空表时 passed_ratio 记 0.0,0.0 < 0.15,于是页面显示"结构偏弱"。
+    通过率 0% 和"一只都没扫出来"在数值上没法区分,只能靠 availability 分开。
+    """
+    import pandas as pd
+
+    from app.services.analytics import AnalyticsService
+
+    stage = AnalyticsService._market_stage(pd.DataFrame(columns=["passed"]))
+
+    assert stage["availability"] == "unavailable"
+    assert stage["label"] is None
+    assert stage["passed_ratio"] is None
+    assert stage["sample_count"] == 0
+    assert stage["reason"]
+
+    # 缺列也算不出:表有行但没有 passed 这一列时同样不能给结论
+    no_column = AnalyticsService._market_stage(pd.DataFrame({"code": ["600001.SH"]}))
+    assert no_column["availability"] == "unavailable"
+    assert no_column["label"] is None
+
+    # 对照:真的全不通过时给"结构偏弱",而且 availability 是 available。
+    # 这一条是为了证明上面的 unavailable 不是把正常的 0% 也误伤了。
+    all_failed = AnalyticsService._market_stage(pd.DataFrame({"passed": [False, False]}))
+    assert all_failed["availability"] == "available"
+    assert all_failed["label"] == "结构偏弱"
+    assert all_failed["passed_ratio"] == 0.0
+
+
 def test_sentiment_industry_moneyflow_aggregates_by_industry(client):
     """行业资金流:按最新资金流交易日聚合,如实带出数据覆盖区间。"""
     response = client.get("/api/sentiment")

@@ -55,9 +55,11 @@ async function loadOverview() {
   try {
     const data = await request("/api/sentiment");
     const stage = data.market_stage || {};
-    document.querySelector("#metric-stage").textContent = stage.label || "—";
+    document.querySelector("#metric-stage").textContent = stage.label || "算不出";
     document.querySelector("#metric-stage-note").textContent =
-      stage.passed_ratio == null ? "来自最近一次扫描批次" : `门槛通过率 ${formatPercent(stage.passed_ratio)}`;
+      stage.passed_ratio == null
+        ? stage.reason || "来自最近一次扫描批次"
+        : `门槛通过率 ${formatPercent(stage.passed_ratio)}`;
     renderNewsCards(data.news_sentiment || lastDigest);
   } catch (error) {
     // 情绪概览依赖扫描批次，读不到就如实显示原因，不编造

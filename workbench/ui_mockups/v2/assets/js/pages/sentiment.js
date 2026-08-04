@@ -8,8 +8,7 @@ async function load() {
   clearError(); setLoading(true);
   try {
     const data = await request("/api/sentiment");
-    document.querySelector("#stage-label").textContent = data.market_stage.label;
-    document.querySelector("#stage-ratio").textContent = formatPercent(data.market_stage.passed_ratio);
+    renderMarketStage(data.market_stage || {});
     document.querySelector("#industry-rows").innerHTML = (data.industries || []).map((item, index) => `
       <tr><td class="mono">${index + 1}</td><td>${escapeHtml(item.industry || item.name || "未知")}</td><td class="mono">${formatNumber(item.heat ?? item.score ?? item.avg_pct, 2)}</td><td class="mono">${formatPercent(item.up_ratio)}</td></tr>`).join("") || `<tr><td colspan="4"><div class="empty-state">暂无行业热度数据</div></td></tr>`;
     document.querySelector("#money-classes").innerHTML = Object.entries(data.money_classes || {}).map(([name, count]) => `<div class="kv"><span>${escapeHtml(name)}</span><span>${formatNumber(count, 0)}</span></div>`).join("");
@@ -24,12 +23,42 @@ document.querySelector("#mf-refresh")?.addEventListener("click", load);
 document.querySelector("#mf-filter")?.addEventListener("input", renderIndustryMoneyflowRows);
 load();
 
+// 市场结构:算不出就显示"算不出"并给出原因,不要退成"结构偏弱"那一档
+function renderMarketStage(stage) {
+  const labelEl = document.querySelector("#stage-label");
+  const ratioEl = document.querySelector("#stage-ratio");
+  const noteEl = document.querySelector("#stage-note");
+  const available = stage.availability !== "unavailable" && stage.label != null;
+  labelEl.textContent = available ? stage.label : "算不出";
+  ratioEl.textContent = formatPercent(stage.passed_ratio);
+  if (!noteEl) return;
+  noteEl.textContent = available
+    ? `由最新候选池门槛通过率判断 · 样本 ${formatNumber(stage.sample_count, 0)} 只`
+    : stage.reason || "最新扫描没有明细行,判不出市场结构";
+}
+
 let industryMoneyflow = { items: [] };
 
 // 涨红跌绿:正数红、负数绿、0 或空无色
 function signClass(value) {
   if (value == null || Number.isNaN(Number(value)) || Number(value) === 0) return "";
   return Number(value) > 0 ? "up" : "down";
+}
+
+// 结构判断算不出时显示"算不出"并给原因，不要留空 —— 空白会被当成"结构偏弱"之外的
+// 某种正常状态，而实际上是这一批扫描没有明细行、判不出来。
+function renderMarketStage(stage) {
+  const labelEl = document.querySelector("#stage-label");
+  const ratioEl = document.querySelector("#stage-ratio");
+  const noteEl = document.querySelector("#stage-note");
+  const unavailable = stage.availability === "unavailable" || stage.label == null;
+  if (labelEl) labelEl.textContent = unavailable ? "算不出" : stage.label;
+  if (ratioEl) ratioEl.textContent = formatPercent(stage.passed_ratio);
+  if (noteEl) {
+    noteEl.textContent = unavailable
+      ? stage.reason || "最新扫描没有明细行，判不出市场结构"
+      : `由最新候选池门槛通过率判断 · 样本 ${formatNumber(stage.sample_count, 0)} 只`;
+  }
 }
 
 function renderIndustryMoneyflow(mf) {
