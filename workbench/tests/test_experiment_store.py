@@ -66,7 +66,13 @@ DECISION_COLUMNS = {
 }
 
 
-def _run_row(run_id: str, *, status: str = "running") -> dict:
+def _run_row(
+    run_id: str,
+    *,
+    status: str = "running",
+    candidate_count: int = 1,
+    final_count: int = 1,
+) -> dict:
     return {
         "run_id": run_id,
         "as_of": "20260804",
@@ -78,8 +84,8 @@ def _run_row(run_id: str, *, status: str = "running") -> dict:
         "temperature": 0.1,
         "prompt_version": "p1",
         "candidate_hash": "sha256:abc",
-        "candidate_count": 20,
-        "final_count": 1,
+        "candidate_count": candidate_count,
+        "final_count": final_count,
         "hybrid_rule_weight": 0.5,
         "hybrid_ai_weight": 0.5,
         "created_at": "2026-08-04T15:31:00+08:00",
@@ -127,6 +133,15 @@ def _decisions(run_id: str) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _append_group_row(
+    rows: pd.DataFrame, group_name: str, ts_code: str
+) -> pd.DataFrame:
+    extra = rows[rows["group_name"] == group_name].iloc[[0]].copy()
+    extra["ts_code"] = ts_code
+    extra["rank"] = 2
+    return pd.concat([rows, extra], ignore_index=True)
 
 
 def _primary_key(store: Store, table: str) -> list[str]:
@@ -214,6 +229,87 @@ def test_database_error_rolls_back_run_and_decisions(tmp_path):
 
         assert store.experiment_run("db-error") is None
         assert store.experiment_decisions("db-error").empty
+        leaked = store.con.execute(
+            "SELECT view_name FROM duckdb_views() "
+            "WHERE view_name IN "
+            "('_stg_experiment_decisions', '_experiment_decisions_stage')"
+        ).fetchall()
+        assert leaked == []
+
+
+@pytest.mark.parametrize(
+    ("case", "candidate_count", "final_count"),
+    [
+        ("selected-missing", 2, 2),
+        ("selected-extra", 2, 1),
+        ("benchmark-missing", 2, 1),
+        ("benchmark-extra", 1, 1),
+    ],
+)
+def test_group_row_counts_must_match_run_metadata(
+    tmp_path, case, candidate_count, final_count
+):
+    run_id = f"count-{case}"
+    run_row = _run_row(
+        run_id,
+        candidate_count=candidate_count,
+        final_count=final_count,
+    )
+    rows = _decisions(run_id)
+    if case == "selected-missing":
+        rows = _append_group_row(rows, "ai", "100001.SZ")
+        rows = _append_group_row(rows, "hybrid", "100002.SZ")
+        rows = _append_group_row(rows, "benchmark", "100003.SZ")
+    elif case == "selected-extra":
+        rows = _append_group_row(rows, "rule", "100001.SZ")
+        rows = _append_group_row(rows, "benchmark", "100002.SZ")
+    elif case == "benchmark-extra":
+        rows = _append_group_row(rows, "benchmark", "100001.SZ")
+
+    with Store(tmp_path / f"{case}.duckdb") as store:
+        store.create_experiment_run(run_row)
+        with pytest.raises(ValueError, match="行数"):
+            store.record_experiment(run_row, rows)
+
+        assert store.experiment_run(run_id)["status"] == "running"
+        assert store.experiment_decisions(run_id).empty
+
+
+def test_duplicate_ts_code_within_group_is_rejected_before_transaction(tmp_path):
+    run_row = _run_row("duplicate", candidate_count=2)
+    rows = _append_group_row(_decisions("duplicate"), "benchmark", "000004.SZ")
+
+    with Store(tmp_path / "duplicate.duckdb") as store:
+        store.create_experiment_run(run_row)
+        with pytest.raises(ValueError, match="重复"):
+            store.record_experiment(run_row, rows)
+
+        assert store.experiment_run("duplicate")["status"] == "running"
+        assert store.experiment_decisions("duplicate").empty
+
+
+def test_record_rejects_outer_transaction_without_stealing_it_or_leaking_stage(
+    tmp_path,
+):
+    with Store(tmp_path / "outer-transaction.duckdb") as store:
+        store.con.execute("BEGIN TRANSACTION")
+        store.con.execute(
+            "INSERT INTO daily_limit VALUES ('000001.SZ', '20260804', 11.0, 9.0)"
+        )
+
+        with pytest.raises(RuntimeError, match="外层事务"):
+            store.record_experiment(_run_row("nested"), _decisions("nested"))
+
+        store.con.execute(
+            "INSERT INTO daily_limit VALUES ('000002.SZ', '20260804', 12.0, 8.0)"
+        )
+        store.con.execute("COMMIT")
+        assert store.con.execute("SELECT COUNT(*) FROM daily_limit").fetchone() == (2,)
+        leaked = store.con.execute(
+            "SELECT view_name FROM duckdb_views() "
+            "WHERE view_name LIKE '%experiment_decisions%'"
+        ).fetchall()
+        assert leaked == []
 
 
 def test_duplicate_record_is_idempotent_and_does_not_overwrite_success(tmp_path):
@@ -227,7 +323,7 @@ def test_duplicate_record_is_idempotent_and_does_not_overwrite_success(tmp_path)
         ) is False
         saved = store.experiment_run("same")
         assert saved["status"] == "succeeded"
-        assert saved["candidate_count"] == 20
+        assert saved["candidate_count"] == 1
 
 
 def test_create_and_fail_run_enforce_status_transitions(tmp_path):
@@ -245,6 +341,68 @@ def test_create_and_fail_run_enforce_status_transitions(tmp_path):
         assert saved["status"] == "failed"
         assert saved["finished_at"] == "2026-08-04T15:40:00+08:00"
         assert saved["error_json"] == '{"type":"AIRequestError"}'
+
+
+def test_succeeded_run_cannot_be_marked_failed(tmp_path):
+    with Store(tmp_path / "succeeded.duckdb") as store:
+        store.record_experiment(_run_row("succeeded"), _decisions("succeeded"))
+
+        with pytest.raises(ValueError, match="成功"):
+            store.fail_experiment_run(
+                "succeeded",
+                "2026-08-04T15:40:00+08:00",
+                '{"type":"late-error"}',
+            )
+
+        saved = store.experiment_run("succeeded")
+        assert saved["status"] == "succeeded"
+        assert saved["error_json"] is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"run_id": ""},
+        {"as_of": ""},
+        {"data_cutoff_at": None},
+        {"strategy_name": "  "},
+        {"strategy_version": None},
+        {"model": ""},
+        {"prompt_version": ""},
+        {"candidate_hash": ""},
+        {"candidate_count": 0},
+        {"final_count": 0},
+        {"candidate_count": 1, "final_count": 2},
+        {"temperature": None},
+        {"hybrid_rule_weight": -0.1, "hybrid_ai_weight": 1.1},
+        {"hybrid_rule_weight": 0.4, "hybrid_ai_weight": 0.5},
+    ],
+)
+def test_run_audit_metadata_is_strictly_validated(tmp_path, overrides):
+    row = {**_run_row("invalid-audit"), **overrides}
+    with Store(tmp_path / "invalid-audit.duckdb") as store:
+        with pytest.raises(ValueError):
+            store.create_experiment_run(row)
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [("as_of", "20260805"), ("candidate_hash", "sha256:different")],
+)
+def test_existing_run_rejects_mismatched_audit_metadata(tmp_path, field, changed):
+    run_row = _run_row("audit-mismatch")
+    with Store(tmp_path / f"audit-{field}.duckdb") as store:
+        store.create_experiment_run(run_row)
+
+        with pytest.raises(ValueError, match="审计"):
+            store.record_experiment(
+                {**run_row, field: changed}, _decisions("audit-mismatch")
+            )
+
+        saved = store.experiment_run("audit-mismatch")
+        assert saved["status"] == "running"
+        assert saved[field] == run_row[field]
+        assert store.experiment_decisions("audit-mismatch").empty
 
 
 def test_update_decision_uses_strict_field_whitelist(tmp_path):
