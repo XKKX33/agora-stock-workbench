@@ -210,14 +210,14 @@ def _run_row(
     }
 
 
-def _pending_decisions(run_id: str) -> pd.DataFrame:
+def _pending_decisions(run_id: str, ts_code: str = CODE) -> pd.DataFrame:
     rows = []
     for group_name in ("rule", "ai", "hybrid", "benchmark"):
         row = {column: None for column in _DECISION_COLUMNS}
         row.update(
             run_id=run_id,
             group_name=group_name,
-            ts_code=CODE,
+            ts_code=ts_code,
             name="样本",
             industry="测试",
             rank=1,
@@ -231,9 +231,11 @@ def _pending_decisions(run_id: str) -> pd.DataFrame:
 
 
 def _seed_experiment(
-    store: Store, run_id: str = "r1", as_of: str = AS_OF
+    store: Store, run_id: str = "r1", as_of: str = AS_OF, ts_code: str = CODE
 ) -> None:
-    store.record_experiment(_run_row(run_id, as_of=as_of), _pending_decisions(run_id))
+    store.record_experiment(
+        _run_row(run_id, as_of=as_of), _pending_decisions(run_id, ts_code)
+    )
 
 
 def _seed_calendar(store: Store, sessions: list[str] = SESSIONS) -> None:
@@ -318,6 +320,7 @@ def test_backfill_uses_next_open_for_entry_and_market_session_targets(tmp_path):
 def test_required_entry_limit_dates_keeps_old_pending_experiments(tmp_path):
     with Store(tmp_path / "required-limits.duckdb") as store:
         _seed_experiment(store, "old", as_of=AS_OF)
+        _seed_experiment(store, "old-second", as_of=AS_OF, ts_code="000002.SZ")
         _seed_experiment(store, "later", as_of=SESSIONS[1])
         _seed_calendar(store)
         store.upsert(
@@ -352,6 +355,25 @@ def test_required_entry_limit_dates_keeps_old_pending_experiments(tmp_path):
                         "trade_date": SESSIONS[0],
                         "up_limit": 12.0,
                         "down_limit": 10.0,
+                    }
+                ]
+            ),
+            keys=("ts_code", "trade_date"),
+        )
+        assert required_entry_limit_dates(store) == [SESSIONS[0]]
+
+        _seed_limit(store)
+        assert required_entry_limit_dates(store) == [SESSIONS[0]]
+
+        store.upsert(
+            "daily_limit",
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000002.SZ",
+                        "trade_date": SESSIONS[0],
+                        "up_limit": 11.0,
+                        "down_limit": 9.0,
                     }
                 ]
             ),

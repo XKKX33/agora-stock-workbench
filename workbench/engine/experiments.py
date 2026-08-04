@@ -361,7 +361,7 @@ def required_entry_limit_dates(store: Any, exchange: str = "SSE") -> list[str]:
         return []
 
     needed: set[str] = set()
-    covered_dates: dict[str, bool] = {}
+    coverage: dict[tuple[str, str], bool] = {}
     run_dates: dict[str, str] = {}
     pending_entries = rows[
         rows["entry_status"].isna() | rows["entry_status"].eq("pending_entry")
@@ -371,15 +371,19 @@ def required_entry_limit_dates(store: Any, exchange: str = "SSE") -> list[str]:
         entry_date = store.sessions_after(exchange, as_of, 1)
         if entry_date is None or entry_date > data_max:
             continue
-        if entry_date not in covered_dates:
-            covered_dates[entry_date] = (
+        coverage_key = (row["ts_code"], entry_date)
+        if coverage_key not in coverage:
+            coverage[coverage_key] = (
                 store.con.execute(
-                    "SELECT 1 FROM daily_limit WHERE trade_date = ? LIMIT 1",
-                    [entry_date],
+                    """
+                    SELECT 1 FROM daily_limit
+                    WHERE ts_code = ? AND trade_date = ?
+                    """,
+                    [row["ts_code"], entry_date],
                 ).fetchone()
                 is not None
             )
-        if not covered_dates[entry_date]:
+        if not coverage[coverage_key]:
             needed.add(entry_date)
     return sorted(needed)
 
