@@ -27,6 +27,7 @@ _F_BASIC = "ts_code,symbol,name,area,industry,market,list_date"
 _F_DBASIC = "ts_code,trade_date,turnover_rate,volume_ratio,total_mv,circ_mv"
 _F_MF = ("ts_code,trade_date,net_mf_amount,buy_lg_amount,sell_lg_amount,"
          "buy_elg_amount,sell_elg_amount")
+_F_LIMIT = "ts_code,trade_date,up_limit,down_limit"
 
 
 class TushareClient:
@@ -81,6 +82,9 @@ class TushareClient:
     def daily_basic(self, trade_date: str) -> pd.DataFrame:
         return self._call("daily_basic", trade_date=trade_date, fields=_F_DBASIC)
 
+    def stk_limit(self, trade_date: str) -> pd.DataFrame:
+        return self._call("stk_limit", trade_date=trade_date, fields=_F_LIMIT)
+
     def moneyflow(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         return self._call("moneyflow", ts_code=ts_code, start_date=start_date,
                           end_date=end_date)
@@ -108,11 +112,20 @@ def ingest_snapshot(store: Store, client: TushareClient, as_of: str) -> dict:
     daily = client.daily(trade_date=as_of)
     basic = client.stock_basic()
     dbasic = client.daily_basic(trade_date=as_of)
+    daily_limit = client.stk_limit(trade_date=as_of)
 
     n_daily = store.upsert("daily", daily, keys=("ts_code", "trade_date"))
     n_basic = store.upsert("stock_basic", basic, keys=("ts_code",))
     n_dbasic = store.upsert("daily_basic", dbasic, keys=("ts_code", "trade_date"))
-    return {"daily": n_daily, "stock_basic": n_basic, "daily_basic": n_dbasic}
+    n_daily_limit = store.upsert(
+        "daily_limit", daily_limit, keys=("ts_code", "trade_date")
+    )
+    return {
+        "daily": n_daily,
+        "stock_basic": n_basic,
+        "daily_basic": n_dbasic,
+        "daily_limit": n_daily_limit,
+    }
 
 
 def ingest_history(store: Store, client: TushareClient, ts_codes: list[str],
