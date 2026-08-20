@@ -23,20 +23,6 @@ document.querySelector("#mf-refresh")?.addEventListener("click", load);
 document.querySelector("#mf-filter")?.addEventListener("input", renderIndustryMoneyflowRows);
 load();
 
-// 市场结构:算不出就显示"算不出"并给出原因,不要退成"结构偏弱"那一档
-function renderMarketStage(stage) {
-  const labelEl = document.querySelector("#stage-label");
-  const ratioEl = document.querySelector("#stage-ratio");
-  const noteEl = document.querySelector("#stage-note");
-  const available = stage.availability !== "unavailable" && stage.label != null;
-  labelEl.textContent = available ? stage.label : "算不出";
-  ratioEl.textContent = formatPercent(stage.passed_ratio);
-  if (!noteEl) return;
-  noteEl.textContent = available
-    ? `由最新候选池门槛通过率判断 · 样本 ${formatNumber(stage.sample_count, 0)} 只`
-    : stage.reason || "最新扫描没有明细行,判不出市场结构";
-}
-
 let industryMoneyflow = { items: [] };
 
 // 涨红跌绿:正数红、负数绿、0 或空无色
@@ -101,8 +87,8 @@ function renderIndustryMoneyflowRows() {
 }
 
 function renderNewsSentiment(news) {
-  const stateEl = document.querySelector("#community-state");
-  const reasonEl = document.querySelector("#community-reason");
+  const stateEl = document.querySelector("#news-sentiment-state");
+  const reasonEl = document.querySelector("#news-sentiment-reason");
   if (!stateEl || !reasonEl) return;
   if (news.availability === "available") {
     const counts = news.counts || {};

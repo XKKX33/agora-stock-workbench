@@ -13,26 +13,111 @@
     <main class="main-shell">
       <div id="error-banner" class="error-banner" role="alert"></div>
       <header class="page-header">
-        <div><div class="eyebrow">Decision pipeline</div><h1>选股流程</h1><p>一条轨迹看清股票从候选召回到最终入选的数量变化，以及每只股票被淘汰的原因。</p></div>
-        <button id="refresh" class="button">刷新</button>
+        <div><div class="eyebrow">One-click run</div><h1>一键全流程</h1><p id="pipeline-meta">尚未运行</p></div>
+        <div class="button-row">
+          <button id="refresh" class="button" type="button">刷新</button>
+        </div>
       </header>
 
-      <section class="scan-rail">
-        <article class="scan-node"><span>01 / 候选召回</span><strong data-funnel>—</strong><span>行业、突破和种子召回</span></article>
-        <article class="scan-node"><span>02 / 完成打分</span><strong data-funnel>—</strong><span>上下文与因子完整</span></article>
-        <article class="scan-node"><span>03 / 通过门槛</span><strong data-funnel>—</strong><span>结构、动量与量能</span></article>
-        <article class="scan-node"><span>04 / 最终入选</span><strong data-funnel>—</strong><span>行业去重与资金确认</span></article>
+      <section class="workflow-band" aria-labelledby="schedule-title">
+        <div class="section-heading">
+          <div><h2 id="schedule-title">自动调度与运行闸门</h2><p id="schedule-state">读取中</p></div>
+        </div>
+        <div id="schedule-grid" class="schedule-grid"></div>
+        <p id="gate-note" class="gate-note">读取中</p>
       </section>
 
-      <section class="grid grid-2" style="margin-top:16px">
-        <article class="panel">
-          <div class="panel-header"><div><h2>最终入选</h2><p>按综合分排序</p></div></div>
+      <section class="workflow-band" aria-labelledby="trigger-title">
+        <div class="section-heading">
+          <div><h2 id="trigger-title">手动运行</h2><p>留空即由闸门推断该跑哪一天，并沿用配置里的策略与数据来源</p></div>
+        </div>
+        <form id="trigger-form" class="control-bar">
+          <label>交易日<input id="trigger-date" class="field" type="date"></label>
+          <label>策略<input id="trigger-strategy" class="field mono" type="text" placeholder="沿用配置" autocomplete="off"></label>
+          <label>数据来源<select id="trigger-online" class="field">
+            <option value="">沿用配置</option>
+            <option value="true">在线拉取</option>
+            <option value="false">仅用本地库</option>
+          </select></label>
+          <label class="control-check"><input id="trigger-force" type="checkbox">强制重跑（同日同策略已成功也重算）</label>
+          <label class="control-check"><input id="trigger-ignore-gate" type="checkbox">忽略「还没到运行时间」（日历缺失仍会拒绝）</label>
+          <button id="one-click" class="button primary" type="submit">一键全流程</button>
+        </form>
+        <p id="trigger-result" class="gate-note" hidden></p>
+      </section>
+
+      <section class="workflow-band" aria-labelledby="backfill-title">
+        <div class="section-heading">
+          <div><h2 id="backfill-title">按交易日补齐</h2><p>从最近的可见交易日往前逐日补跑，日期由可见窗口给出</p></div>
+        </div>
+        <form id="backfill-form" class="control-bar">
+          <label>补齐天数<input id="backfill-count" class="field narrow mono" type="number" min="1" max="120" value="5"></label>
+          <label>策略<input id="backfill-strategy" class="field mono" type="text" placeholder="沿用配置" autocomplete="off"></label>
+          <label>数据来源<select id="backfill-online" class="field">
+            <option value="">沿用配置</option>
+            <option value="true">在线拉取</option>
+            <option value="false">仅用本地库</option>
+          </select></label>
+          <label class="control-check"><input id="backfill-force" type="checkbox">强制重跑</label>
+          <button id="backfill-run" class="button" type="submit">补齐</button>
+        </form>
+        <p id="backfill-result" class="gate-note" hidden></p>
+      </section>
+
+      <section class="workflow-band" aria-labelledby="workflow-title">
+        <div class="section-heading">
+          <div><h2 id="workflow-title">本次运行</h2><p id="pipeline-state">等待任务</p></div>
+          <a class="text-link" href="p5_ledger.html">查看实验台账</a>
+        </div>
+        <div id="pipeline-steps" class="pipeline-track" aria-live="polite"></div>
+        <p id="pipeline-error" class="pipeline-failure" role="alert" hidden></p>
+        <div id="step-detail" class="step-detail" hidden></div>
+      </section>
+
+      <section class="workflow-band" aria-labelledby="group-title">
+        <div class="section-heading">
+          <div><h2 id="group-title">四组实验结果</h2><p id="group-meta">等待批次</p></div>
+          <a class="text-link" href="p5_ledger.html">按台账口径核对</a>
+        </div>
+        <div id="group-tabs" class="mode-tabs" role="tablist"></div>
+        <div class="table-wrap"><table><thead><tr><th>排名</th><th>股票</th><th>行业</th><th>本组得分</th><th>买入价</th><th>成交状态</th></tr></thead><tbody id="group-rows"></tbody></table></div>
+        <div class="pagination-bar" aria-label="四组结果翻页">
+          <button id="group-prev" class="button icon-button" type="button" aria-label="上一页" title="上一页">←</button>
+          <span id="group-page-label" class="mono">第 1 / 1 页</span>
+          <button id="group-next" class="button icon-button" type="button" aria-label="下一页" title="下一页">→</button>
+        </div>
+      </section>
+
+      <section class="workflow-band" aria-labelledby="history-title">
+        <div class="section-heading">
+          <div><h2 id="history-title">任务历史</h2><p id="history-meta">最近十条，点一行看当时的九步执行情况</p></div>
+        </div>
+        <div id="history-tabs" class="mode-tabs" role="tablist">
+          <button class="tab-btn active" type="button" data-kind="one_click_pipeline">一键全流程</button>
+          <button class="tab-btn" type="button" data-kind="one_click_backfill">按日期补齐</button>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>提交时间</th><th>交易日</th><th>策略</th><th>状态</th><th>耗时</th><th>结果</th></tr></thead><tbody id="history-rows"></tbody></table></div>
+      </section>
+
+      <section class="workflow-band" aria-labelledby="rule-scan-title">
+        <div class="section-heading"><div><h2 id="rule-scan-title">系统规则扫描</h2><p>当前扫描批次</p></div></div>
+        <div class="scan-rail">
+          <article class="scan-node"><span>候选召回</span><strong data-funnel>—</strong><span>规则候选池</span></article>
+          <article class="scan-node"><span>完成打分</span><strong data-funnel>—</strong><span>完整上下文</span></article>
+          <article class="scan-node"><span>通过门槛</span><strong data-funnel>—</strong><span>规则门槛</span></article>
+          <article class="scan-node"><span>最终入选</span><strong data-funnel>—</strong><span>行业去重</span></article>
+        </div>
+      </section>
+
+      <section class="split-section">
+        <div>
+          <div class="section-heading"><div><h2>规则入选</h2><p>按综合分排序</p></div></div>
           <div class="table-wrap"><table><thead><tr><th>排名</th><th>股票</th><th>行业</th><th>综合分</th></tr></thead><tbody id="selected-rows"></tbody></table></div>
-        </article>
-        <article class="panel">
-          <div class="panel-header"><div><h2>主要淘汰样本</h2><p>展示真实门槛原因</p></div></div>
+        </div>
+        <div>
+          <div class="section-heading"><div><h2>门槛未通过</h2><p>最近二十条</p></div></div>
           <div class="table-wrap"><table><thead><tr><th>股票</th><th>行业</th><th>状态</th><th>原因</th></tr></thead><tbody id="rejected-rows"></tbody></table></div>
-        </article>
+        </div>
       </section>
     </main>
   </div>

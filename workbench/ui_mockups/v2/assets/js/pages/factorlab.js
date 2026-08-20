@@ -6,7 +6,7 @@
 // 但**诊断信息照样展示**——用户要看清"差在哪"才知道下一步做什么,
 // 只显示一句"模型不可用"等于什么都没说。
 import { query, request } from "/assets/js/api.js";
-import { clearError, initShell, setLoading, setStatus, showError } from "/assets/js/app-shell.js";
+import { clearError, initShell, setLoading, setStatus, setWorkContext, showError, workContextParams } from "/assets/js/app-shell.js";
 import { escapeHtml, formatNumber, formatPercent, statusTag } from "/assets/js/format.js";
 
 initShell("factorlab");
@@ -16,8 +16,9 @@ let icChart = null;
 async function load() {
   clearError(); setLoading(true);
   try {
-    const [data, stocks] = await Promise.all([request("/api/factors"), query("/api/stocks", { selected: true, per_page: 100 })]);
+    const [data, stocks] = await Promise.all([request(`/api/factors?${new URLSearchParams(workContextParams())}`), query("/api/stocks", { ...workContextParams(), selected: true, per_page: 100 })]);
     renderCoverage(data.factors || []);
+    setWorkContext({ run_id: data.run_id, strategy: data.strategy, as_of: data.as_of, data_cutoff: data.data_cutoff || data.data_cutoff_at, availability: data.availability, missing_reason: data.missing_reason });
     const select = document.querySelector("#stock-select");
     select.innerHTML = (stocks.items || []).map((item) => `<option value="${escapeHtml(item.ts_code)}">${escapeHtml(item.name)} · ${escapeHtml(item.ts_code)}</option>`).join("");
     renderMachineLearning(data.machine_learning || {});

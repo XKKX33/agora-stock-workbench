@@ -111,7 +111,7 @@
         <div>
           <div class="eyebrow">Settings · OpenAI Compatible</div>
           <h1>API 设置</h1>
-          <p>OpenAI 兼容接口（base_url / api_key 环境变量名 / model）与多 agent 参数。</p>
+          <p>OpenAI 兼容接口（base_url / model）与多 agent 参数。API 密钥仅从固定环境变量 <code>WORKBENCH_AI_API_KEY</code> 读取，页面不会接收或保存密钥。</p>
         </div>
         <div class="button-row">
           <a class="button" href="p11_agents.html">← 回到 AI Agent</a>
@@ -128,9 +128,9 @@
           <div class="grid-form" id="agent-form">
             <label class="field-row"><span class="label">启用</span><select id="agent-enabled" class="field"><option value="false">否</option><option value="true">是</option></select></label>
             <label class="field-row"><span class="label">provider</span><input id="agent-provider" class="field" value="openai_compatible" placeholder="openai_compatible"></label>
-            <label class="field-row"><span class="label">base_url</span><input id="agent-base-url" class="field" placeholder="https://api.example.com/v1"></label>
-            <label class="field-row"><span class="label">api_key 环境变量名</span><input id="agent-api-key-env" class="field" placeholder="WORKBENCH_AI_API_KEY"></label>
-            <label class="field-row"><span class="label">model <span class="hint">模型名</span></span><input id="agent-model" class="field" placeholder="deepseek-chat"></label>
+            <label class="field-row"><span class="label">base_url</span><input id="agent-base-url" class="field" placeholder="https://grok.xuan.christmas/v1"></label>
+            <label class="field-row"><span class="label">API 密钥</span><input id="agent-api-key-env" class="field" value="WORKBENCH_AI_API_KEY" readonly></label>
+            <label class="field-row"><span class="label">model <span class="hint">模型名</span></span><input id="agent-model" class="field" placeholder="grok-4.5"></label>
             <label class="field-row"><span class="label">temperature <span class="hint">0~2</span></span><input id="agent-temperature" class="field" type="number" step="0.1" min="0" max="2"></label>
             <label class="field-row"><span class="label">max_tokens <span class="hint">100~32000</span></span><input id="agent-max-tokens" class="field" type="number" min="100" max="32000"></label>
           </div>

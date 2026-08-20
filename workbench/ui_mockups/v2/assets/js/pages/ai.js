@@ -1,5 +1,5 @@
 import { request } from "/assets/js/api.js";
-import { clearError, initShell, setLoading, setStatus, showError } from "/assets/js/app-shell.js";
+import { clearError, initShell, setLoading, setStatus, setWorkContext, showError, workContextParams } from "/assets/js/app-shell.js";
 import { escapeHtml, formatDate, statusTag } from "/assets/js/format.js";
 
 initShell("ai");
@@ -102,7 +102,8 @@ async function loadReview() {
   clearError();
   setLoading(true);
   try {
-    const data = await request("/api/reviews");
+    const data = await request(`/api/reviews?${new URLSearchParams(workContextParams())}`);
+    setWorkContext({ run_id: data.run_id, strategy: data.strategy, as_of: data.as_of || data.trade_date, data_cutoff: data.data_cutoff || data.data_cutoff_at, availability: data.availability, missing_reason: data.missing_reason });
     renderLegend(data.label_legend);
     renderMeta(data);
     renderSections(data.sections || {});

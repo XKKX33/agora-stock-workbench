@@ -1,5 +1,5 @@
-// AI Agent 页:个股研判 + 选股流程共用一套进度/结果渲染。
-import { initShell, setStatus, showError } from "/assets/js/app-shell.js";
+// p11 is the launch/configuration page; p13 owns live/history report rendering.
+import { initShell, setStatus, showError, workContextParams } from "/assets/js/app-shell.js";
 import { query, request } from "/assets/js/api.js";
 import { escapeHtml, formatNumber } from "/assets/js/format.js";
 
@@ -195,7 +195,7 @@ async function startSingle() {
   try {
     const job = await request("/api/agents/single", {
       method: "POST",
-      body: JSON.stringify({ ts_code: code, force }),
+      body: JSON.stringify({ ...workContextParams(), ts_code: code, force }),
     });
     renderProgress("queued", 0, 0, "排队中");
     pollJob(job.job_id);
@@ -204,6 +204,7 @@ async function startSingle() {
 
 async function startFlow() {
   const body = {
+    ...workContextParams(),
     candidates: Number(document.querySelector("#agent-candidates").value) || agentDefaults.candidates,
     depth: Number(document.querySelector("#agent-depth").value) || agentDefaults.depth,
     final: Number(document.querySelector("#agent-final").value) || agentDefaults.final,
@@ -222,10 +223,10 @@ function switchMode(next) {
   const isSingle = mode === "single";
   singleFields.hidden = !isSingle;
   flowFields.hidden = isSingle;
-  modeTitle.textContent = isSingle ? "????" : "????";
+  modeTitle.textContent = isSingle ? "单股深度研判" : "Agent 选股研判";
   modeDesc.textContent = isSingle
-    ? "??????,????? + ???? + ?????"
-    : "??? ? ?? ? ???? ? ??????? ? ???? ? ?? N ?";
+    ? "针对一只股票运行分析、辩论与风控"
+    : "从候选池粗筛，经多角色分析和风控输出最终名单";
   document.querySelector("#mode-single").classList.toggle("active", isSingle);
   document.querySelector("#mode-flow").classList.toggle("active", !isSingle);
 }
@@ -236,11 +237,11 @@ async function loadRecent() {
     const data = await request("/api/agents/jobs?limit=6");
     const items = data.items || [];
     recentHost.innerHTML = items.length
-      ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">最近研判</div>` + items.map((it) => `
+      ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">最近研判 · 详情与 SSE 报告见 p13</div>` + items.map((it) => `
         <span class="agent-recent-row" data-job="${esc(it.task_id || it.job_id || it.run_id || "")}">
           ${esc(it.strategy || it.kind || "")} · ${esc(it.status || "")}
         </span>`).join("")
-      : `<div style="font-size:12px;color:var(--text-muted)">暂无研判记录</div>`;
+      : `<div style="font-size:12px;color:var(--text-muted)">暂无研判记录 · 可从 p13 打开历史报告</div>`;
     recentHost.querySelectorAll("[data-job]").forEach((row) => {
       row.addEventListener("click", async () => {
         const id = row.dataset.job;

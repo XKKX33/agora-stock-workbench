@@ -14,16 +14,20 @@
       <div id="error-banner" class="error-banner" role="alert"></div>
       <header class="page-header">
         <div>
-          <div class="eyebrow">Portfolio backtest</div>
+          <div class="eyebrow">Portfolio backtest · legacy ledger</div>
           <h1>组合回测</h1>
-          <p>在真实选股台账上按<strong>不重叠调仓</strong>结算：每隔 N 个截面开一笔，上一笔结清后再开下一笔。没有回填的期次整期跳过，不当 0 收益。</p>
+          <p>本页只消费旧台账 `ret1/ret3/ret5/ret10` 字段，并按<strong>不重叠调仓</strong>结算；独立实验收益 `t1_close`、`t2_open`…`t10_open` 请前往台账或 Agent 报告。</p>
         </div>
         <div class="button-row">
+          <a class="button" href="p5_ledger.html">实验台账</a>
+          <a class="button" href="p13_agent_dashboard.html">Agent 报告</a>
           <select id="strategy" class="field"><option value="">全部策略</option></select>
           <select id="horizon" class="field"></select>
           <label class="field-inline">持仓 <input id="top-k" class="field narrow" type="number" min="1" max="50" step="1" value="5"></label>
-          <label class="field-inline">成本bp <input id="cost-bps" class="field narrow" type="number" min="0" max="500" step="5"></label>
-          <button id="refresh" class="button primary">重算</button>
+          <label class="field-inline">买入bp <input id="buy-cost-bps" class="field narrow" type="number" min="0" max="500" step="1"></label>
+          <label class="field-inline">卖出bp <input id="sell-cost-bps" class="field narrow" type="number" min="0" max="500" step="1"></label>
+          <label class="field-inline">调仓 <select id="rebalance-mode" class="field"><option value="non_overlap">不重叠</option></select></label>
+          <label class="field-inline">涨停成交 <select id="limit-up-fill-policy" class="field"><option value="skip">不可成交跳过</option><option value="allow">允许</option></select></label>
         </div>
       </header>
 

@@ -1,8 +1,8 @@
 // p1_desk.js · 选股台控制器
 // 候选池来自 /api/stocks（真实扫描结果）；自选股来自 /api/watchlist；行业资金流来自 /api/sentiment
+import { clearError, getWorkContext, initShell, setLoading, setStatus, setWorkContext, showError, workContextParams } from "/assets/js/app-shell.js";
 import { query, request } from "/assets/js/api.js";
-import { clearError, initShell, setLoading, setStatus, showError } from "/assets/js/app-shell.js";
-import { escapeHtml, formatDate, formatNumber, statusTag } from "/assets/js/format.js";
+import { escapeHtml, formatDate, formatNumber, formatPercent, statusTag } from "/assets/js/format.js";
 
 initShell("desk");
 let currentCode = new URLSearchParams(location.search).get("code");
@@ -27,6 +27,7 @@ async function loadStocks() {
   clearError();
   setLoading(true);
   const params = {
+    ...workContextParams(),
     search: document.querySelector("#search").value,
     industry: document.querySelector("#industry").value,
     passed: document.querySelector("#passed").value,
@@ -37,6 +38,7 @@ async function loadStocks() {
   try {
     const data = await query("/api/stocks", params);
     renderRows(data.items);
+    setWorkContext({ run_id: data.run_id, strategy: data.strategy, as_of: data.as_of, data_cutoff: data.data_cutoff || data.data_cutoff_at, availability: data.availability, missing_reason: data.missing_reason });
     fillIndustries(data.items);
     document.querySelector("#result-count").textContent = `${data.meta.total} 只候选`;
     setStatus(`扫描截面 ${data.as_of}`, "ready");

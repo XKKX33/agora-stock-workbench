@@ -13,21 +13,36 @@
     <main class="main-shell">
       <div id="error-banner" class="error-banner" role="alert"></div>
       <header class="page-header">
-        <div><div class="eyebrow">Post-trade review</div><h1>台账复盘</h1><p>查看真实选股记录和已经发生的后续收益。样本不足时保持空值，不生成虚假胜率。</p></div>
-        <div class="button-row"><select id="strategy" class="field"><option value="">全部策略</option><option value="strong_mainup">强主升</option></select><button id="refresh" class="button">刷新</button></div>
+        <div><div class="eyebrow">Experiment ledger</div><h1>按日期实验台账</h1><p>规则、AI、混合和基准使用同一信号日口径；成交与收益全部来自 experiment_returns。</p></div>
+        <div class="button-row"><a class="button" href="p13_agent_dashboard.html">Agent 报告</a><button id="refresh" class="button" type="button">刷新</button></div>
       </header>
 
-      <section class="grid grid-4">
-        <article class="panel metric"><span class="metric-label">选股记录</span><strong id="ledger-total" class="metric-value">—</strong><span class="metric-note">全部台账行</span></article>
-        <article class="panel metric"><span class="metric-label">T+1 平均</span><strong id="ret1-avg" class="metric-value">—</strong><span id="ret1-sample" class="metric-note">—</span></article>
-        <article class="panel metric"><span class="metric-label">T+5 平均</span><strong id="ret5-avg" class="metric-value">—</strong><span id="ret5-sample" class="metric-note">—</span></article>
-        <article class="panel metric"><span class="metric-label">T+10 平均</span><strong id="ret10-avg" class="metric-value">—</strong><span id="ret10-sample" class="metric-note">—</span></article>
-      </section>
-      <span id="ret3-avg" hidden></span><span id="ret3-sample" hidden></span>
+      <form id="ledger-filters" class="filter-bar">
+        <label>信号日期<input id="as-of" class="field" type="date"></label>
+        <label>实验组<select id="group" class="field"><option value="">全部组</option><option value="rule">规则</option><option value="ai">AI</option><option value="hybrid">混合</option><option value="benchmark">基准</option></select></label>
+        <label>股票代码<input id="ts-code" class="field mono" type="text" placeholder="000001.SZ" autocomplete="off"></label>
+        <label>成交状态<select id="entry-status" class="field"><option value="">全部状态</option><option value="filled">已成交</option><option value="entry_unavailable">无法成交</option><option value="pending_entry">待成交</option></select></label>
+        <button class="button primary" type="submit">筛选</button>
+        <button id="clear-filters" class="button" type="button">清空</button>
+      </form>
 
-      <section class="panel" style="margin-top:16px">
-        <div class="panel-header"><div><h2>历史选股</h2><p>收益为空表示对应交易日尚未发生或尚未回填</p></div></div>
-        <div class="table-wrap"><table><thead><tr><th>运行时间</th><th>股票</th><th>行业</th><th>综合分</th><th>资金确认</th><th>T+1</th><th>T+3</th><th>T+5</th><th>T+10</th></tr></thead><tbody id="ledger-rows"></tbody></table></div>
+      <section class="workflow-band" aria-labelledby="summary-title">
+        <div class="section-heading"><div><h2 id="summary-title">四组 T+1 收盘对比</h2><p id="ledger-total">—</p></div></div>
+        <div id="group-summary" class="group-summary"></div>
+      </section>
+      <section class="workflow-band" aria-labelledby="returns-summary-title">
+        <div class="section-heading"><div><h2 id="returns-summary-title">独立收益验证</h2><p>experiment_returns：T+1 收盘、T+2 开盘至 T+10 开盘，四组合并按期限统计；缺失保留原因，不显示为 0。</p></div></div>
+        <div id="returns-summary" class="group-summary"></div>
+      </section>
+
+      <section class="ledger-section">
+        <div class="section-heading"><div><h2>信号记录</h2><p>买入价为下一交易日开盘价；收益列取自 experiment_returns 的 t1_close / t3_open / t5_open / t10_open，算不出的格子显示「—」并给出原因。</p></div></div>
+        <div class="table-wrap"><table><thead><tr><th>信号日</th><th>组别</th><th>排名</th><th>股票</th><th>买入日</th><th>买入价</th><th>成交状态</th><th>T+1 收盘</th><th>T+3 开盘</th><th>T+5 开盘</th><th>T+10 开盘</th><th>待处理原因</th></tr></thead><tbody id="ledger-rows"></tbody></table></div>
+        <div class="pagination-bar" aria-label="实验台账翻页">
+          <button id="prev-page" class="button icon-button" type="button" aria-label="上一页" title="上一页">←</button>
+          <span id="page-label" class="mono">第 1 / 1 页</span>
+          <button id="next-page" class="button icon-button" type="button" aria-label="下一页" title="下一页">→</button>
+        </div>
       </section>
     </main>
   </div>

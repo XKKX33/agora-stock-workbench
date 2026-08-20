@@ -7,7 +7,7 @@
 //    一条从 1.0 开始的平线看着像"策略没赚钱",而真实情况是"还没测得到"。
 // 2. 成本、调仓口径、权重属于**假设**,单独一栏,不混进指标卡冒充事实。
 import { query } from "/assets/js/api.js";
-import { clearError, initShell, setLoading, setStatus, showError } from "/assets/js/app-shell.js";
+import { clearError, getWorkContext, initShell, setLoading, setStatus, setWorkContext, showError, workContextParams } from "/assets/js/app-shell.js";
 import { escapeHtml, formatNumber, formatPercent } from "/assets/js/format.js";
 
 initShell("backtest");
@@ -16,16 +16,15 @@ let equityChart = null;
 let compareChart = null;
 let optionsReady = false;
 
-const HORIZON_LABEL = { ret1: "T+1", ret3: "T+3", ret5: "T+5", ret10: "T+10" };
+const HORIZON_LABEL = { ret1: "legacy T+1", ret3: "legacy T+3", ret5: "legacy T+5", ret10: "legacy T+10" };
 
-// missing_reason 是 engine 给的机器码,页面负责翻成"下一步该做什么"。
-// 只显示原始码等于把排查工作又推回给用户。
+// p9 只回测旧台账 ret* 字段；独立 experiment_returns 的 t1_close/t2_open…t10_open 在 p5/p13 展示。
 const REASON_TEXT = {
   no_picks: ["台账里没有选股记录", "先在选股台跑一次扫描并记账，回测才有输入。"],
   no_picks_on_day: ["调仓日当天没有选股", "该截面的台账为空。"],
   no_measurable_period: [
-    "有台账，但没有一期的收益回填完整",
-    "retN 要等 T+N 个交易日之后才有值。等交易日走满，或在流程页跑一次回填。",
+    "有台账，但没有一期的 legacy 收益回填完整",
+    "retN 要等 T+N 个交易日之后才有值。独立 experiment_returns 请到台账或 Agent 报告查看。",
   ],
 };
 
@@ -40,16 +39,21 @@ function reasonOf(code) {
 
 function readControls() {
   const topK = Number(document.querySelector("#top-k").value) || 5;
-  const rawCost = document.querySelector("#cost-bps").value;
+  const valueOf = (id) => {
+    const raw = document.querySelector(id)?.value ?? "";
+    return raw === "" ? undefined : Number(raw);
+  };
   return {
-    strategy: document.querySelector("#strategy").value,
+    ...workContextParams(),
+    strategy: document.querySelector("#strategy").value || getWorkContext().strategy,
     horizon: document.querySelector("#horizon").value || "ret5",
     top_k: topK,
-    // 空串表示"用服务端默认",不在前端猜一个数写进请求
-    cost_bps: rawCost === "" ? undefined : Number(rawCost),
+    buy_cost_bps: valueOf("#buy-cost-bps"),
+    sell_cost_bps: valueOf("#sell-cost-bps"),
+    rebalance_mode: document.querySelector("#rebalance-mode")?.value || "non_overlap",
+    limit_up_fill_policy: document.querySelector("#limit-up-fill-policy")?.value || "skip",
   };
 }
-
 async function load() {
   clearError();
   setLoading(true);
@@ -57,8 +61,17 @@ async function load() {
   try {
     const [single, compare] = await Promise.all([
       query("/api/backtest", params),
-      query("/api/backtest/compare", { horizon: params.horizon, top_k: params.top_k, cost_bps: params.cost_bps }),
+      query("/api/backtest/compare", {
+        ...workContextParams(),
+        horizon: params.horizon,
+        strategy: params.strategy,
+        top_k: params.top_k,
+        buy_cost_bps: params.buy_cost_bps,
+        sell_cost_bps: params.sell_cost_bps,
+        rebalance_mode: params.rebalance_mode,
+      }),
     ]);
+    setWorkContext({ run_id: single.run_id, strategy: single.strategy || params.strategy, as_of: single.as_of || single.signal_date, data_cutoff: single.data_cutoff || single.data_cutoff_at, availability: single.availability, missing_reason: single.missing_reason });
     syncOptions(single, compare);
     renderNotice(single);
     renderMetrics(single);
@@ -80,6 +93,7 @@ async function load() {
   }
 }
 
+
 // 期限选项、默认成本、策略清单都由接口给出,页面不写死——写死一份就会和 engine 分叉。
 function syncOptions(single, compare) {
   const horizonSelect = document.querySelector("#horizon");
@@ -92,10 +106,15 @@ function syncOptions(single, compare) {
     horizonSelect.value = single.horizon;
     optionsReady = true;
   }
-  const costInput = document.querySelector("#cost-bps");
-  if (costInput.value === "" && single.default_cost_bps != null) {
-    costInput.value = String(single.default_cost_bps);
-    costInput.placeholder = String(single.default_cost_bps);
+  const buyCostInput = document.querySelector("#buy-cost-bps");
+  if (buyCostInput?.value === "" && single.default_buy_cost_bps != null) {
+    buyCostInput.value = String(single.default_buy_cost_bps);
+    buyCostInput.placeholder = String(single.default_buy_cost_bps);
+  }
+  const sellCostInput = document.querySelector("#sell-cost-bps");
+  if (sellCostInput?.value === "" && single.default_sell_cost_bps != null) {
+    sellCostInput.value = String(single.default_sell_cost_bps);
+    sellCostInput.placeholder = String(single.default_sell_cost_bps);
   }
 
   const select = document.querySelector("#strategy");
@@ -296,6 +315,7 @@ function renderPeriods(payload) {
   const SKIP_TEXT = {
     return_not_backfilled: "收益未回填",
     no_picks_on_day: "当天无选股",
+    entry_unavailable: "不可成交",
   };
   const skipped = payload.skipped || [];
   document.querySelector("#skip-hint").textContent = skipped.length ? `共 ${skipped.length} 期` : "";
@@ -306,12 +326,13 @@ function renderPeriods(payload) {
       </div>`).join("")
     : `<p class="muted" style="margin:0;font-size:11px">没有期次被跳过</p>`;
 }
-
 function renderAssumptions(payload) {
   const a = payload.assumptions || {};
   document.querySelector("#assumptions").innerHTML = [
     kv("调仓口径", a.mode_note || a.mode || "—"),
-    kv("双边成本", a.cost_bps == null ? "—" : `${formatNumber(a.cost_bps, 1)} bp`),
+    kv("买入成本", a.buy_cost_bps == null ? "—" : `${formatNumber(a.buy_cost_bps, 1)} bp`),
+    kv("卖出成本", a.sell_cost_bps == null ? "—" : `${formatNumber(a.sell_cost_bps, 1)} bp`),
+    kv("涨停成交", a.limit_up_fill_policy || "—"),
     kv("成本计法", a.cost_note || "—"),
     kv("权重", a.weighting || "—"),
     kv("夏普口径", a.sharpe_note || "—"),
@@ -323,6 +344,7 @@ function renderAssumptions(payload) {
     kv("应有期次", formatNumber(c.scheduled_periods, 0)),
     kv("已测期次", formatNumber(c.measured_periods, 0)),
     kv("跳过期次", formatNumber(c.skipped_periods, 0)),
+    kv("覆盖率", c.coverage_ratio == null ? "—" : formatPercent(c.coverage_ratio)),
     kv("中间有洞", c.has_interior_gap ? "是" : "否"),
   ].join("");
 }
@@ -444,7 +466,7 @@ document.querySelector("#refresh")?.addEventListener("click", load);
 ["#strategy", "#horizon"].forEach((selector) => {
   document.querySelector(selector)?.addEventListener("change", load);
 });
-["#top-k", "#cost-bps"].forEach((selector) => {
+["#top-k", "#buy-cost-bps", "#sell-cost-bps", "#rebalance-mode", "#limit-up-fill-policy"].forEach((selector) => {
   // change 而不是 input:每敲一个数字就重算会打出一串请求
   document.querySelector(selector)?.addEventListener("change", load);
 });

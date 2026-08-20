@@ -247,24 +247,25 @@
       <div id="error-banner" class="error-banner" role="alert"></div>
       <header class="page-header">
         <div>
-          <div class="eyebrow">Multi‑Agent · Short‑term Desk</div>
-          <h1>AI Agent</h1>
-          <p>个股深度研判 + 选股流程（候选池&rarr;粗筛&rarr;三位分析师&rarr;多空辩论&rarr;最优 N 只）</p>
+          <div class="eyebrow">Multi‑Agent · Launch & configuration</div>
+          <h1>Agent 研判启动</h1>
+          <p>p11 负责选择单股或候选池、读取配置并启动任务；公开通话、事件时间线和历史收益报告请在 p13 查看。</p>
         </div>
         <div class="button-row">
+          <a class="button" href="p13_agent_dashboard.html">实时/历史报告</a>
           <a class="button" href="p12_settings.html">⚙ API 设置</a>
         </div>
       </header>
 
       <section class="panel">
         <div class="panel-header">
-          <div><h2 id="mode-title">个股研判</h2><p id="mode-desc">输入一只股票，三位分析师 + 多空辩论 + 风控出结论</p></div>
+          <div><h2 id="mode-title">单股深度研判</h2><p id="mode-desc">针对一只股票运行分析、辩论与风控</p></div>
           <div id="agent-status" class="agent-status">读取配置中…</div>
         </div>
 
         <div class="mode-tabs">
-          <button type="button" class="tab-btn active" id="mode-single" data-mode="single">📊 个股研判</button>
-          <button type="button" class="tab-btn" id="mode-flow" data-mode="flow">📋 选股流程</button>
+          <button type="button" class="tab-btn active" id="mode-single" data-mode="single">单股深度研判</button>
+          <button type="button" class="tab-btn" id="mode-flow" data-mode="flow">Agent 选股研判</button>
         </div>
 
         <div id="single-fields" class="agent-config">
@@ -272,7 +273,7 @@
           <datalist id="agent-stock-options"></datalist>
           <label class="agent-field" style="justify-self:end"><input id="agent-force-single" type="checkbox" class="chk" style="width:auto"> 强制重跑</label>
           <div class="config-actions">
-            <button id="agent-single-run" class="button primary" type="button" style="min-height:30px;padding:0 20px;font-size:12px">开始个股研判</button>
+            <button id="agent-single-run" class="button primary" type="button">单股深度研判</button>
           </div>
         </div>
 
@@ -282,7 +283,7 @@
           <label class="agent-field"><span class="field-label">最终输出 <span class="hint">最优 N 只</span></span><input id="agent-final" class="field field-sm" type="number" min="1" max="10" step="1"></label>
           <label class="agent-field" style="justify-self:end"><input id="agent-force-flow" type="checkbox" class="chk" style="width:auto"> 强制重跑</label>
           <div class="config-actions">
-            <button id="agent-flow-run" class="button primary" type="button" style="min-height:30px;padding:0 20px;font-size:12px">开始选股流程</button>
+            <button id="agent-flow-run" class="button primary" type="button">Agent 选股研判</button>
           </div>
         </div>
 

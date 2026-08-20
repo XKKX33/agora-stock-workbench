@@ -18,7 +18,7 @@ async function loadSettings() {
     set("#agent-enabled", agent.enabled ? "true" : "false");
     set("#agent-provider", agent.provider || "openai_compatible");
     set("#agent-base-url", agent.base_url || "");
-    set("#agent-api-key-env", agent.api_key_env || "WORKBENCH_AI_API_KEY");
+    set("#agent-api-key-env", "WORKBENCH_AI_API_KEY");
     set("#agent-model", agent.model || "");
     set("#agent-temperature", agent.temperature ?? 0.2);
     set("#agent-max-tokens", agent.max_tokens ?? 4000);
@@ -44,7 +44,7 @@ async function saveSettings() {
         enabled: document.querySelector("#agent-enabled").value === "true",
         provider: document.querySelector("#agent-provider").value.trim() || null,
         base_url: document.querySelector("#agent-base-url").value.trim() || null,
-        api_key_env: document.querySelector("#agent-api-key-env").value.trim() || null,
+        api_key_env: "WORKBENCH_AI_API_KEY",
         model: document.querySelector("#agent-model").value.trim() || null,
         temperature: Number(document.querySelector("#agent-temperature").value) || null,
         max_tokens: Number(document.querySelector("#agent-max-tokens").value) || null,
