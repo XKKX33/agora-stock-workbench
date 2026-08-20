@@ -502,7 +502,11 @@ def _linked_news_row(row: pd.Series) -> dict:
 
 
 def _prediction_review(
-    store: Store, strategy: Optional[str], *, backfill: bool
+    store: Store,
+    strategy: Optional[str],
+    *,
+    backfill: bool,
+    visible_max: Optional[str],
 ) -> dict:
     """历史预测回看。IC / 胜率 / 分层都是样本内统计,标 derived。
 
@@ -511,7 +515,7 @@ def _prediction_review(
     过程的产物,读路径凭空推断出来的"原因"是猜的。
     """
     if backfill:
-        report = run_postmortem(store, strategy)
+        report = run_postmortem(store, strategy, visible_max=visible_max)
         # 补一个 mode 标记:页面据此区分"这份 pending 有原因"和"只读没判定"
         report.setdefault("backfill", {})["mode"] = "backfilled"
     else:
@@ -557,6 +561,7 @@ def build_review(
     trade_date: str,
     strategy: Optional[str] = None,
     backfill: bool = False,
+    visible_max: Optional[str] = None,
 ) -> dict:
     """装配一份带标注的收盘后复盘结果(可直接 JSON 序列化)。
 
@@ -565,6 +570,8 @@ def build_review(
         strategy:   策略名;None 表示不限定策略,取该日最先匹配到的批次。
         backfill:   是否顺带回填 T+N 收益。默认 False——页面查看复盘不该
                     悄悄改库。盘后链条已在自己的回填步做过,也传 False。
+        visible_max: 回填时的可见日上限(只在 backfill=True 时有意义):隐藏
+                    窗口内的目标交易日不回填。None 表示不设上限。
 
     任何一节缺数据都会以 available=False + missing_reason 返回,不抛异常;
     但底层数据库错误照常上抛——"读不到"和"读出来是空的"是两回事。
@@ -604,7 +611,7 @@ def build_review(
 
     sections["news_highlights"] = _news_highlights(store, trade_date)
     sections["prediction_review"] = _prediction_review(
-        store, batch_strategy, backfill=backfill
+        store, batch_strategy, backfill=backfill, visible_max=visible_max
     )
 
     missing = [
@@ -631,21 +638,32 @@ def _cli() -> None:
     用法:
         python -m engine.review --trade-date 20260731
         python -m engine.review --trade-date 20260731 --strategy strong_mainup
+
+    交易日必须在可见范围内:复盘会把那天的结论、收益回看摊开,查隐藏窗口
+    里的日期就是提前看当时还看不到的结果,与接口层同一条纪律。
     """
     import argparse
 
     from .config import load_settings, resolve_path
+    from .schedule import load_schedule_config, normalize_trade_date
+    from .visibility import LookaheadBlocked, ensure_visible, resolve_window
 
     parser = argparse.ArgumentParser(description="查看某交易日的收盘后复盘结果")
-    parser.add_argument("--trade-date", required=True, help="交易日 YYYYMMDD")
+    parser.add_argument("--trade-date", required=True, help="交易日 YYYYMMDD(必须 <= 可见日)")
     parser.add_argument("--strategy", default=None, help="策略名,默认不限定")
     parser.add_argument("--db", default=None, help="DuckDB 路径,默认取 settings.data.db_path")
     args = parser.parse_args()
 
     settings = load_settings()
+    config = load_schedule_config(settings)
     db_path = args.db or str(resolve_path(settings["data"]["db_path"]))
     with Store(db_path, ensure_schema=False) as store:
-        review = build_review(store, trade_date=args.trade_date, strategy=args.strategy)
+        window = resolve_window(store, settings, exchange=config.exchange)
+        try:
+            trade_date = ensure_visible(normalize_trade_date(args.trade_date), window)
+        except LookaheadBlocked as exc:
+            raise SystemExit(f"拒绝查看复盘:{exc}") from exc
+        review = build_review(store, trade_date=trade_date, strategy=args.strategy)
     print(json.dumps(review, ensure_ascii=False, indent=2, default=str))
 
 

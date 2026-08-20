@@ -200,11 +200,15 @@ def train_from_store(
     artifact_base: Optional[str] = None,
     save: bool = True,
     model_params: Optional[Dict[str, Any]] = None,
+    end: Optional[str] = None,
 ) -> TrainReport:
     """端到端:重放历史 → 训练 → 评估 → (可选)落盘。
 
     store 必须以只读方式打开(ensure_schema=False),本函数不写库。
     产物落到 data/models/<name>.json,与数据库解耦。
+
+    ``end`` 是采样截止日(含当天),原样交给 build_dataset。不传就是库里
+    最新交易日的纯数据口径;防前视由调用方先算可见日再传入。
     """
     samples, dataset_report = build_dataset(
         store,
@@ -214,6 +218,7 @@ def train_from_store(
         horizon=horizon,
         max_days=max_days,
         stride=stride,
+        end=end,
     )
     model, report = train_on_frame(
         samples,

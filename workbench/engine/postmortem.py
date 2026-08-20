@@ -40,12 +40,17 @@ HORIZONS: Dict[str, int] = {"ret1": 1, "ret3": 3, "ret5": 5, "ret10": 10}
 # 与 backtest.MIN_PERIODS_FOR_SHARPE 同样取 4,理由相同:都是"均值/波动"型指标。
 MIN_DAYS_FOR_IC_IR = 4
 
+# 待回填原因里属于"正常等待、不用人管"的两类:未来还没走到、以及目标日
+# 还落在防前视隐藏窗口里。其余原因都是真的缺数据,要出现在 needs_attention。
+_WAITING_REASONS = ("future_not_reached", "future_not_visible")
+
 
 @dataclass
 class BackfillReport:
     filled: Dict[str, int] = field(default_factory=dict)   # 每期限回填条数
     pending: Dict[str, int] = field(default_factory=dict)  # 每期限仍待回填
-    # 待回填的具体原因分布,便于把"缺数据"和"未来未到"区分开:
+    # 待回填的具体原因分布,便于把"缺数据"和"还得等"区分开:
+    #   future_not_visible —— 目标交易日还在防前视隐藏窗口里(当时看不到,正常等待)
     #   future_not_reached —— 目标交易日还没走到(超出已入库行情的最大日期,正常等待)
     #   calendar_missing   —— 日历本身没覆盖到那一天(需要回补 trade_cal)
     #   target_bar_missing —— 目标交易日全市场有行情、该票没有(停牌/退市)
@@ -56,16 +61,19 @@ class BackfillReport:
         return sum(self.filled.values())
 
     def needs_attention(self) -> Dict[str, int]:
-        """汇总"不是单纯等待未来"的待回填量——这些是要人处理的缺数据。"""
+        """汇总"不是单纯等待"的待回填量——这些是要人处理的缺数据。"""
         out: Dict[str, int] = {}
         for reasons in self.pending_reasons.values():
             for name, cnt in reasons.items():
-                if name != "future_not_reached":
-                    out[name] = out.get(name, 0) + cnt
+                if name in _WAITING_REASONS:
+                    continue
+                out[name] = out.get(name, 0) + cnt
         return out
 
 
-def backfill_returns(store: Store, exchange: str = "SSE") -> BackfillReport:
+def backfill_returns(
+    store: Store, exchange: str = "SSE", visible_max: Optional[str] = None
+) -> BackfillReport:
     """把 picks 台账里能算的 retN 都补上。返回回填统计。
 
     口径按市场交易日历(见 Store.future_close),停牌不顶替、不臆造。
@@ -76,6 +84,11 @@ def backfill_returns(store: Store, exchange: str = "SSE") -> BackfillReport:
     不是日历末日:日历是我们主动往前多拉的(见 run_scan._calendar_lookahead_end),
     它的末日在未来,说明不了任何事。目标日 > data_max 就是未来还没到;
     目标日 <= data_max 却查不到该票的收盘价,才是这只票真的缺行情。
+
+    ``visible_max`` 是防前视可见日上限(含当天),与 engine/returns 同一口径:
+    比它更新的目标交易日记 ``future_not_visible`` 并且**不读那天的行情**——
+    库里通常已经摄取到最新行情,读了就是拿当时看不到的价格做标签。
+    传 None 表示调用方不设上限,只用于纯历史数据的离线补全。
     """
     report = BackfillReport(
         filled={c: 0 for c in HORIZONS},
@@ -107,6 +120,12 @@ def backfill_returns(store: Store, exchange: str = "SSE") -> BackfillReport:
                 # 日历里 as_of 之后不足 n 个开市日。日历本该被拉到未来
                 # (见 run_scan._calendar_lookahead_end),拉不出来就是日历该回补了。
                 _note(col, "calendar_missing")
+                continue
+
+            if visible_max is not None and target > visible_max:
+                # 目标交易日还在隐藏窗口里:本地可能已有行情,但当时看不到。
+                # 先判隐藏、再判数据缺失,顺序反了就会读到未来价格。
+                _note(col, "future_not_visible")
                 continue
 
             if data_max is None or target > data_max:
@@ -264,28 +283,45 @@ def stats_as_dict(s: HorizonStats) -> dict:
     }
 
 
-def run_postmortem(store: Store, strategy: Optional[str] = None) -> dict:
-    """一键复盘：先回填，再统计。返回可直接 JSON 序列化的摘要。"""
-    bf = backfill_returns(store)
+def run_postmortem(
+    store: Store,
+    strategy: Optional[str] = None,
+    *,
+    visible_max: Optional[str] = None,
+) -> dict:
+    """一键复盘：先回填，再统计。返回可直接 JSON 序列化的摘要。
+
+    ``visible_max`` 原样透传给 backfill_returns:隐藏窗口内的目标日不回填。
+    """
+    bf = backfill_returns(store, visible_max=visible_max)
     stats = evaluate(store, strategy)
     return {
         "backfill": {
             "filled": bf.filled,
             "pending": bf.pending,
             "pending_reasons": bf.pending_reasons,
-            # 非"等未来"的待回填量:>0 说明有数据要回补,不该当成正常状态
+            # 非"还得等"的待回填量:>0 说明有数据要回补,不该当成正常状态
             "needs_attention": bf.needs_attention(),
             "total_filled": bf.total_filled(),
+            # 本次的可见日上限:解释 pending 里为什么会有 future_not_visible
+            "visible_max": visible_max,
         },
         "stats": [stats_as_dict(s) for s in stats],
     }
 
 
 def _cli() -> None:
+    """命令行回填并自检。
+
+    回填上限固定为可见日:库里的行情通常已摄取到最新,不设上限就会用隐藏
+    窗口里的收盘价给旧台账填 retN,等于给评估标签掺进当时看不到的未来。
+    """
     import argparse
     import json
 
     from .config import load_settings, resolve_path
+    from .schedule import load_schedule_config
+    from .visibility import LookaheadBlocked, require_visible_as_of, resolve_window
 
     ap = argparse.ArgumentParser(description="自动复盘：回填 T+N 收益并做 IC 自检")
     ap.add_argument("--strategy", default=None, help="仅统计指定策略;默认全部")
@@ -293,9 +329,15 @@ def _cli() -> None:
     args = ap.parse_args()
 
     settings = load_settings()
+    config = load_schedule_config(settings)
     dbp = args.db or str(resolve_path(settings["data"]["db_path"]))
     with Store(dbp) as store:
-        summary = run_postmortem(store, args.strategy)
+        window = resolve_window(store, settings, exchange=config.exchange)
+        try:
+            visible_max = require_visible_as_of(window)
+        except LookaheadBlocked as exc:
+            raise SystemExit(f"拒绝回填:{exc}") from exc
+        summary = run_postmortem(store, args.strategy, visible_max=visible_max)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

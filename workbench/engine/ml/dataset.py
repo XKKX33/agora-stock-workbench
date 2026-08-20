@@ -57,6 +57,10 @@ class DatasetReport:
     skipped_days: Dict[str, int] = field(default_factory=dict)
     n_rows: int = 0
     n_features: int = 0
+    # 本次采样看到的最后一天(调用方传入的 end,或库里最新交易日)。
+    # 训练产物必须能回答"这份模型看过哪天为止的数据",否则事后分不清
+    # 它是否用了当时看不到的行情。
+    end_day: Optional[str] = None
     # 最后一个"标签已经能算出来"的交易日。晚于此日的截面不采样。
     label_cutoff: Optional[str] = None
     label_report: Optional[LabelReport] = None
@@ -72,6 +76,7 @@ class DatasetReport:
             "skipped_days": dict(self.skipped_days),
             "n_rows": self.n_rows,
             "n_features": self.n_features,
+            "end_day": self.end_day,
             "label_cutoff": self.label_cutoff,
             "labels": self.label_report.as_dict() if self.label_report else None,
         }
@@ -198,6 +203,10 @@ def build_dataset(
     max_days : 最多重放多少个交易截面(从 end 往前数)
     stride   : 隔几个交易日取一个截面。>1 可显著降低重放成本,
                同时降低相邻截面的高度重叠(相邻日特征几乎相同)。
+    end      : 采样截止日(含当天)。不传则取库里最新交易日——这是纯数据
+               口径,**不含防前视判断**。要让训练只看当时可见的数据,由调
+               用方(tools/train_ml.py)先算可见日再传进来,与 run_scan 的
+               ``as_of`` 同一条纪律。
 
     返回的表含 META_COLUMNS + 因子列;label 为 NaN 的行**保留**,
     由调用方决定丢弃 —— 丢弃动作与原因统计要分开,便于如实上报。
@@ -209,6 +218,7 @@ def build_dataset(
     report = DatasetReport(horizon=horizon)
 
     end_day = end or store.latest_date()
+    report.end_day = end_day
     if not end_day:
         return pd.DataFrame(), report
 
