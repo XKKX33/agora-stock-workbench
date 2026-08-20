@@ -1,4 +1,4 @@
-"""实验分组与收益回填测试；只使用临时 DuckDB。"""
+"""实验分组与涨跌停补数据测试；只使用临时 DuckDB。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import pytest
 from engine.db import Store
 from engine.db_experiments import _DECISION_COLUMNS
 from engine.experiments import (
-    backfill_experiment_returns,
     build_experiment_decisions,
     candidate_pool_hash,
     required_entry_limit_dates,
@@ -117,17 +116,49 @@ def test_builds_four_groups_with_stable_ranks_and_average_percentiles():
     ]
 
 
-def test_decisions_start_pending_without_invented_reasons_or_risks():
+def test_builds_rule_and_benchmark_when_agent_has_no_usable_result():
+    pool_hash, decisions = build_experiment_decisions(
+        "rule-only", _scan_rows(), None, final_count=3
+    )
+
+    assert pool_hash == candidate_pool_hash(_scan_rows())
+    assert set(decisions["group_name"]) == {"rule", "benchmark"}
+    assert len(decisions[decisions["group_name"] == "rule"]) == 3
+    assert len(decisions[decisions["group_name"] == "benchmark"]) == 4
+
+
+def test_accepts_fewer_agent_results_than_configured_limit():
+    result = deepcopy(_agent_result())
+    result["final"] = [result["final"][2]]
+    result["deep"] = result["deep"][:2]
+
+    _, decisions = build_experiment_decisions(
+        "partial-agent", _scan_rows(), result, final_count=3
+    )
+
+    counts = decisions.groupby("group_name").size().to_dict()
+    assert counts == {"ai": 1, "benchmark": 4, "hybrid": 2, "rule": 3}
+
+
+def test_decisions_only_carry_decision_columns_without_invented_reasons_or_risks():
     _, decisions = build_experiment_decisions(
         "run-1", _scan_rows(), _agent_result(), final_count=3
     )
 
-    assert set(decisions["entry_status"]) == {"pending_entry"}
-    for horizon in (1, 3, 5, 10):
-        assert set(decisions[f"ret{horizon}_status"]) == {"future_not_reached"}
-        assert decisions[f"ret{horizon}"].isna().all()
-        assert decisions[f"ret{horizon}_target_date"].isna().all()
-        assert decisions[f"ret{horizon}_reason"].isna().all()
+    # 成交与收益只落 experiment_returns，决策表不再有 entry_*/ret* 列。
+    assert set(decisions.columns) == {
+        "run_id",
+        "group_name",
+        "ts_code",
+        "name",
+        "industry",
+        "rank",
+        "rule_score",
+        "ai_score",
+        "hybrid_score",
+        "reason_json",
+        "risk_json",
+    }
     ai_c = decisions[(decisions["group_name"] == "ai") & (decisions["ts_code"] == "C.SZ")].iloc[0]
     assert json.loads(ai_c["reason_json"])["thesis"] == "丙结论"
     assert pd.isna(ai_c["risk_json"])
@@ -138,14 +169,33 @@ def test_decisions_start_pending_without_invented_reasons_or_risks():
     assert pd.isna(rule_a["risk_json"])
 
 
+def test_agent_reason_and_risk_json_redact_credentials_before_persistence():
+    result = deepcopy(_agent_result())
+    result["final"][0]["thesis"] = (
+        "Authorization: Bearer AUDIT_SECRET_SENTINEL"
+    )
+    result["final"][0]["risks"] = ["api_key=AUDIT_SECRET_SENTINEL"]
+    result["deep"][0]["points"] = ["sk-AUDIT_SECRET_SENTINEL"]
+
+    _, decisions = build_experiment_decisions(
+        "secret-run", _scan_rows(), result, final_count=3
+    )
+
+    persisted_json = "\n".join(
+        str(value)
+        for value in decisions[["reason_json", "risk_json"]].to_numpy().ravel()
+        if not pd.isna(value)
+    )
+    assert "AUDIT_SECRET_SENTINEL" not in persisted_json
+    assert "[REDACTED]" in persisted_json
+
+
 @pytest.mark.parametrize(
     "mutate,match",
     [
-        (lambda result: result.update(final=result["final"][:-1]), "final"),
         (lambda result: result["final"].__setitem__(1, {**result["final"][0]}), "final"),
         (lambda result: result["final"][0].update(ts_code="OUT.SZ"), "候选池"),
         (lambda result: result["final"][0].update(score=float("nan")), "score"),
-        (lambda result: result.update(deep=result["deep"][:2]), "deep"),
         (lambda result: result["deep"][0].update(ts_code="OUT.SZ"), "候选池"),
         (lambda result: result["deep"][0].update(score=float("inf")), "score"),
     ],
@@ -210,7 +260,7 @@ def _run_row(
     }
 
 
-def _pending_decisions(run_id: str, ts_code: str = CODE) -> pd.DataFrame:
+def _decisions(run_id: str, ts_code: str = CODE) -> pd.DataFrame:
     rows = []
     for group_name in ("rule", "ai", "hybrid", "benchmark"):
         row = {column: None for column in _DECISION_COLUMNS}
@@ -222,10 +272,7 @@ def _pending_decisions(run_id: str, ts_code: str = CODE) -> pd.DataFrame:
             industry="测试",
             rank=1,
             rule_score=80.0,
-            entry_status="pending_entry",
         )
-        for horizon in (1, 3, 5, 10):
-            row[f"ret{horizon}_status"] = "future_not_reached"
         rows.append(row)
     return pd.DataFrame(rows, columns=_DECISION_COLUMNS)
 
@@ -233,9 +280,7 @@ def _pending_decisions(run_id: str, ts_code: str = CODE) -> pd.DataFrame:
 def _seed_experiment(
     store: Store, run_id: str = "r1", as_of: str = AS_OF, ts_code: str = CODE
 ) -> None:
-    store.record_experiment(
-        _run_row(run_id, as_of=as_of), _pending_decisions(run_id, ts_code)
-    )
+    store.record_experiment(_run_row(run_id, as_of=as_of), _decisions(run_id, ts_code))
 
 
 def _seed_calendar(store: Store, sessions: list[str] = SESSIONS) -> None:
@@ -271,72 +316,137 @@ def _seed_limit(store: Store, up_limit: float | None = 11.0) -> None:
     )
 
 
-def _saved(store: Store, run_id: str = "r1") -> pd.DataFrame:
-    return store.experiment_decisions(run_id).set_index("group_name")
+def _returns_row(
+    run_id: str,
+    group_name: str,
+    *,
+    ts_code: str = CODE,
+    entry_price: float | None = None,
+    status: str = "pending_entry",
+) -> dict:
+    return {
+        "run_id": run_id,
+        "group_name": group_name,
+        "ts_code": ts_code,
+        "horizon": "t1_close",
+        "entry_date": SESSIONS[0],
+        "entry_price": entry_price,
+        "sell_date": None,
+        "sell_session": "close",
+        "sell_price": None,
+        "status": status,
+        "reason": None,
+        "gross_return": None,
+        "created_at": "2026-08-06T18:00:00+08:00",
+        "updated_at": "2026-08-06T18:00:00+08:00",
+    }
 
 
-def test_backfill_uses_next_open_for_entry_and_market_session_targets(tmp_path):
-    with Store(tmp_path / "normal.duckdb") as store:
-        _seed_experiment(store)
-        _seed_calendar(store)
-        _seed_limit(store)
-        store.upsert(
-            "daily",
-            pd.DataFrame(
-                [
-                    _daily_row(SESSIONS[0], close=11.0),
-                    _daily_row(SESSIONS[1], close=12.0),
-                    _daily_row(SESSIONS[2], close=13.0),
-                ]
-            ),
-            keys=("ts_code", "trade_date"),
-        )
-
-        pending_calls = 0
-        original_pending = store.pending_experiment_decisions
-
-        def tracked_pending():
-            nonlocal pending_calls
-            pending_calls += 1
-            return original_pending()
-
-        store.pending_experiment_decisions = tracked_pending
-        summary = backfill_experiment_returns(store)
-        saved = _saved(store)
-
-        assert set(saved["entry_date"]) == {SESSIONS[0]}
-        assert set(saved["entry_price"]) == {10.0}
-        assert set(saved["entry_status"]) == {"filled"}
-        assert saved.loc["rule", "ret1"] == pytest.approx(0.1)
-        assert saved.loc["rule", "ret3"] == pytest.approx(0.3)
-        assert saved.loc["rule", "ret1_target_date"] == SESSIONS[0]
-        assert saved.loc["rule", "ret3_target_date"] == SESSIONS[2]
-        assert summary.updated == 4
-        assert summary.filled == 4
-        assert summary.return_filled == 8
-        assert pending_calls == 1
+def _seed_returns(store: Store, run_id: str = "r1", **kwargs) -> None:
+    """给一个批次的四组决策各写一行收益明细（同一次成交，行级判定）。"""
+    store.upsert_experiment_returns(
+        [
+            _returns_row(run_id, group_name, **kwargs)
+            for group_name in ("rule", "ai", "hybrid", "benchmark")
+        ]
+    )
 
 
-def test_required_entry_limit_dates_keeps_old_pending_experiments(tmp_path):
+def _seed_market(store: Store, trade_date: str, ts_code: str = "MARKET.SH") -> None:
+    store.upsert(
+        "daily",
+        pd.DataFrame([_daily_row(trade_date, ts_code=ts_code)]),
+        keys=("ts_code", "trade_date"),
+    )
+
+
+def _limit_row(ts_code: str, trade_date: str, up_limit: float = 11.0) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "ts_code": ts_code,
+                "trade_date": trade_date,
+                "up_limit": up_limit,
+                "down_limit": 9.0,
+            }
+        ]
+    )
+
+
+def test_required_entry_limit_dates_reports_each_uncovered_date_once(tmp_path):
     with Store(tmp_path / "required-limits.duckdb") as store:
-        _seed_experiment(store, "old", as_of=AS_OF)
-        _seed_experiment(store, "old-second", as_of=AS_OF, ts_code="000002.SZ")
+        _seed_experiment(store, "old")
+        _seed_experiment(store, "old-second", ts_code="000002.SZ")
         _seed_experiment(store, "later", as_of=SESSIONS[1])
         _seed_calendar(store)
+        _seed_market(store, SESSIONS[2])
+        # 较新批次的买入日已有权威涨跌停价，旧批次仍缺 SESSIONS[0]。
         store.upsert(
-            "daily",
-            pd.DataFrame([_daily_row(SESSIONS[2], ts_code="MARKET.SH")]),
+            "daily_limit",
+            _limit_row(CODE, SESSIONS[2]),
             keys=("ts_code", "trade_date"),
         )
-        # 较新批次的 entry 日已经齐全，旧批次仍缺 20260805 的权威涨跌停价。
+
+        # 同一天两只票都缺覆盖，日期只出现一次。
+        assert required_entry_limit_dates(store) == [SESSIONS[0]]
+
+        # 别的股票在同一天有覆盖不算数。
+        store.upsert(
+            "daily_limit",
+            _limit_row("OTHER.SH", SESSIONS[0], up_limit=12.0),
+            keys=("ts_code", "trade_date"),
+        )
+        assert required_entry_limit_dates(store) == [SESSIONS[0]]
+
+        _seed_limit(store)
+        assert required_entry_limit_dates(store) == [SESSIONS[0]]
+
+        store.upsert(
+            "daily_limit",
+            _limit_row("000002.SZ", SESSIONS[0]),
+            keys=("ts_code", "trade_date"),
+        )
+        assert required_entry_limit_dates(store) == []
+
+
+@pytest.mark.parametrize(
+    ("entry_price", "status", "expected"),
+    [
+        (10.0, "filled", []),
+        (None, "entry_unavailable", []),
+        (None, "entry_bar_missing", []),
+        (None, "pending_entry", [SESSIONS[0]]),
+    ],
+)
+def test_required_entry_limit_dates_skips_settled_entries(
+    tmp_path, entry_price, status, expected
+):
+    with Store(tmp_path / f"settled-{status}.duckdb") as store:
+        _seed_experiment(store)
+        _seed_calendar(store)
+        _seed_market(store, SESSIONS[2])
+        _seed_returns(store, entry_price=entry_price, status=status)
+
+        # 成交已有终局（买到或买不到）就不再补涨跌停价；只有 pending_entry 要继续等。
+        assert required_entry_limit_dates(store) == expected
+
+
+@pytest.mark.parametrize("invalid_up_limit", [None, 0.0, float("nan")])
+def test_required_entry_limit_dates_refetches_invalid_limit_rows(
+    tmp_path, invalid_up_limit
+):
+    with Store(tmp_path / "invalid-limit.duckdb") as store:
+        _seed_experiment(store)
+        _seed_calendar(store)
+        _seed_market(store, SESSIONS[1])
         store.upsert(
             "daily_limit",
             pd.DataFrame(
                 [
                     {
                         "ts_code": CODE,
-                        "trade_date": SESSIONS[2],
-                        "up_limit": 11.0,
+                        "trade_date": SESSIONS[0],
+                        "up_limit": invalid_up_limit,
                         "down_limit": 9.0,
                     }
                 ]
@@ -346,181 +456,27 @@ def test_required_entry_limit_dates_keeps_old_pending_experiments(tmp_path):
 
         assert required_entry_limit_dates(store) == [SESSIONS[0]]
 
-        store.upsert(
-            "daily_limit",
-            pd.DataFrame(
-                [
-                    {
-                        "ts_code": "OTHER.SH",
-                        "trade_date": SESSIONS[0],
-                        "up_limit": 12.0,
-                        "down_limit": 10.0,
-                    }
-                ]
-            ),
-            keys=("ts_code", "trade_date"),
-        )
-        assert required_entry_limit_dates(store) == [SESSIONS[0]]
 
-        _seed_limit(store)
-        assert required_entry_limit_dates(store) == [SESSIONS[0]]
+def test_required_entry_limit_dates_waits_for_the_entry_session(tmp_path):
+    with Store(tmp_path / "future-entry.duckdb") as store:
+        _seed_experiment(store)
+        _seed_calendar(store)
 
-        store.upsert(
-            "daily_limit",
-            pd.DataFrame(
-                [
-                    {
-                        "ts_code": "000002.SZ",
-                        "trade_date": SESSIONS[0],
-                        "up_limit": 11.0,
-                        "down_limit": 9.0,
-                    }
-                ]
-            ),
-            keys=("ts_code", "trade_date"),
-        )
+        # 一行行情都没有时不能凭空要涨跌停价。
         assert required_entry_limit_dates(store) == []
 
+        # 买入日还没到（行情最大日仍是信号日）。
+        _seed_market(store, AS_OF)
+        assert required_entry_limit_dates(store) == []
 
-def test_backfill_keeps_future_entry_pending(tmp_path):
-    with Store(tmp_path / "future.duckdb") as store:
-        _seed_experiment(store)
-        _seed_calendar(store)
-        store.upsert("daily", pd.DataFrame([_daily_row(AS_OF, ts_code="MARKET.SH")]), keys=("ts_code", "trade_date"))
-
-        summary = backfill_experiment_returns(store)
-        saved = _saved(store)
-
-        assert set(saved["entry_date"]) == {SESSIONS[0]}
-        assert set(saved["entry_status"]) == {"pending_entry"}
-        assert set(saved["entry_reason"]) == {"future_not_reached"}
-        assert summary.pending == 4
+        _seed_market(store, SESSIONS[0])
+        assert required_entry_limit_dates(store) == [SESSIONS[0]]
 
 
-def test_backfill_reports_missing_calendar(tmp_path):
-    with Store(tmp_path / "calendar.duckdb") as store:
+def test_required_entry_limit_dates_needs_the_next_session_in_calendar(tmp_path):
+    with Store(tmp_path / "calendar-missing.duckdb") as store:
         _seed_experiment(store)
         _seed_calendar(store, sessions=[])
+        _seed_market(store, AS_OF)
 
-        backfill_experiment_returns(store)
-        saved = _saved(store)
-
-        assert saved["entry_date"].isna().all()
-        assert set(saved["entry_status"]) == {"pending_entry"}
-        assert set(saved["entry_reason"]) == {"calendar_missing"}
-
-
-def test_backfill_rejects_missing_entry_bar(tmp_path):
-    with Store(tmp_path / "entry-missing.duckdb") as store:
-        _seed_experiment(store)
-        _seed_calendar(store)
-        _seed_limit(store)
-        store.upsert("daily", pd.DataFrame([_daily_row(SESSIONS[2], ts_code="MARKET.SH")]), keys=("ts_code", "trade_date"))
-
-        backfill_experiment_returns(store)
-        saved = _saved(store)
-
-        assert set(saved["entry_status"]) == {"entry_unavailable"}
-        assert set(saved["entry_reason"]) == {"entry_bar_missing"}
-        assert set(saved["ret1_status"]) == {"entry_unavailable"}
-        assert set(saved["ret1_reason"]) == {"entry_bar_missing"}
-
-
-@pytest.mark.parametrize("open_price", [None, 0.0, -1.0, float("inf")])
-def test_backfill_rejects_invalid_open(tmp_path, open_price):
-    with Store(tmp_path / "invalid-open.duckdb") as store:
-        _seed_experiment(store)
-        _seed_calendar(store)
-        _seed_limit(store)
-        store.upsert(
-            "daily",
-            pd.DataFrame([_daily_row(SESSIONS[0], open_price=open_price), _daily_row(SESSIONS[2], ts_code="MARKET.SH")]),
-            keys=("ts_code", "trade_date"),
-        )
-
-        backfill_experiment_returns(store)
-        saved = _saved(store)
-
-        assert set(saved["entry_status"]) == {"entry_unavailable"}
-        assert set(saved["entry_reason"]) == {"invalid_open"}
-        assert saved["ret1"].isna().all()
-
-
-def test_backfill_waits_for_authoritative_limit_price(tmp_path):
-    with Store(tmp_path / "limit-missing.duckdb") as store:
-        _seed_experiment(store)
-        _seed_calendar(store)
-        store.upsert("daily", pd.DataFrame([_daily_row(SESSIONS[0])]), keys=("ts_code", "trade_date"))
-
-        backfill_experiment_returns(store)
-        saved = _saved(store)
-
-        assert set(saved["entry_status"]) == {"pending_entry"}
-        assert set(saved["entry_reason"]) == {"limit_price_missing"}
-
-
-def test_backfill_rejects_locked_limit_up_with_fixed_tolerance(tmp_path):
-    with Store(tmp_path / "locked.duckdb") as store:
-        _seed_experiment(store)
-        _seed_calendar(store)
-        _seed_limit(store, up_limit=11.0)
-        store.upsert(
-            "daily",
-            pd.DataFrame([_daily_row(SESSIONS[0], open_price=11.0, high=11.0, low=11.0, close=11.0)]),
-            keys=("ts_code", "trade_date"),
-        )
-
-        summary = backfill_experiment_returns(store)
-        saved = _saved(store)
-
-        assert set(saved["entry_status"]) == {"entry_unavailable"}
-        assert set(saved["entry_reason"]) == {"limit_up_locked"}
-        assert summary.unavailable == 4
-
-
-def test_backfill_marks_reached_target_with_invalid_close_missing(tmp_path):
-    with Store(tmp_path / "target-missing.duckdb") as store:
-        _seed_experiment(store)
-        _seed_calendar(store)
-        _seed_limit(store)
-        store.upsert(
-            "daily",
-            pd.DataFrame(
-                [
-                    _daily_row(SESSIONS[0], close=10.0),
-                    _daily_row(SESSIONS[2], ts_code="MARKET.SH"),
-                ]
-            ),
-            keys=("ts_code", "trade_date"),
-        )
-
-        backfill_experiment_returns(store)
-        saved = _saved(store)
-
-        assert set(saved["ret3_status"]) == {"target_bar_missing"}
-        assert set(saved["ret3_reason"]) == {"target_bar_missing"}
-        assert saved["ret3"].isna().all()
-
-
-def test_backfill_preserves_zero_return_and_is_idempotent(tmp_path):
-    with Store(tmp_path / "zero.duckdb") as store:
-        _seed_experiment(store)
-        _seed_calendar(store)
-        _seed_limit(store)
-        store.upsert(
-            "daily",
-            pd.DataFrame([_daily_row(SESSIONS[0], close=10.0), _daily_row(SESSIONS[2], close=10.0)]),
-            keys=("ts_code", "trade_date"),
-        )
-
-        first = backfill_experiment_returns(store)
-        before = _saved(store).copy()
-        second = backfill_experiment_returns(store)
-        after = _saved(store)
-
-        assert set(after["ret1"]) == {0.0}
-        assert set(after["ret3"]) == {0.0}
-        pd.testing.assert_frame_equal(before, after)
-        assert first.return_filled == 8
-        assert second.updated == 0
-        assert second.return_filled == 0
+        assert required_entry_limit_dates(store) == []

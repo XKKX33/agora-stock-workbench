@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from numbers import Integral, Real
 from typing import Any
 
@@ -42,26 +42,6 @@ _DECISION_COLUMNS = (
     "hybrid_score",
     "reason_json",
     "risk_json",
-    "entry_date",
-    "entry_price",
-    "entry_status",
-    "entry_reason",
-    "ret1",
-    "ret1_target_date",
-    "ret1_status",
-    "ret1_reason",
-    "ret3",
-    "ret3_target_date",
-    "ret3_status",
-    "ret3_reason",
-    "ret5",
-    "ret5_target_date",
-    "ret5_status",
-    "ret5_reason",
-    "ret10",
-    "ret10_target_date",
-    "ret10_status",
-    "ret10_reason",
 )
 
 _REQUIRED_GROUPS = frozenset({"rule", "ai", "hybrid", "benchmark"})
@@ -72,7 +52,6 @@ _REQUIRED_RUN_TEXT_FIELDS = (
     "data_cutoff_at",
     "strategy_name",
     "strategy_version",
-    "model",
     "prompt_version",
     "candidate_hash",
 )
@@ -91,30 +70,46 @@ _AUDIT_RUN_COLUMNS = (
     "hybrid_ai_weight",
 )
 _DECISIONS_STAGE = "_experiment_decisions_stage"
-_UPDATABLE_DECISION_FIELDS = frozenset(
-    {
-        "entry_date",
-        "entry_price",
-        "entry_status",
-        "entry_reason",
-        "ret1",
-        "ret1_target_date",
-        "ret1_status",
-        "ret1_reason",
-        "ret3",
-        "ret3_target_date",
-        "ret3_status",
-        "ret3_reason",
-        "ret5",
-        "ret5_target_date",
-        "ret5_status",
-        "ret5_reason",
-        "ret10",
-        "ret10_target_date",
-        "ret10_status",
-        "ret10_reason",
-    }
-)
+
+# 成交状态:同一条决策的 10 个 horizon 共享同一次成交,因此行级判断即可。
+#   filled            -- 买到了,entry_price 有值
+#   entry_unavailable -- 买不到,涨停封板或买入日没有 K 线
+#   pending_entry     -- 还没定,通常是缺涨跌停价或行情没到
+_ENTRY_UNAVAILABLE_STATUSES = ("entry_unavailable", "entry_bar_missing")
+ENTRY_STATUSES = ("filled", "entry_unavailable", "pending_entry")
+
+
+def entry_status_predicate(entry_status: str, *, alias: str) -> str:
+    """把成交状态翻成 experiment_returns 上的行级 SQL 条件。"""
+    if entry_status not in ENTRY_STATUSES:
+        raise ValueError(f"非法成交状态: {entry_status}")
+    unavailable = ", ".join(f"'{status}'" for status in _ENTRY_UNAVAILABLE_STATUSES)
+    if entry_status == "filled":
+        return f"{alias}.entry_price IS NOT NULL"
+    if entry_status == "entry_unavailable":
+        return f"{alias}.status IN ({unavailable})"
+    return (
+        f"{alias}.entry_price IS NULL"
+        f" AND COALESCE({alias}.status, '') NOT IN ({unavailable})"
+    )
+
+
+def classify_entry_status(rows: Iterable[Mapping[str, Any]]) -> str | None:
+    """按收益明细判断一条决策的成交状态,和上面的 SQL 条件同一套规则。
+
+    还没算过收益的决策返回 None——"没算"和"算过但买不到"是两回事,不合并。
+    """
+    seen = False
+    unavailable = False
+    for row in rows:
+        seen = True
+        if row.get("entry_price") is not None:
+            return "filled"
+        if row.get("status") in _ENTRY_UNAVAILABLE_STATUSES:
+            unavailable = True
+    if not seen:
+        return None
+    return "entry_unavailable" if unavailable else "pending_entry"
 
 
 class ExperimentMixin:
@@ -222,13 +217,42 @@ class ExperimentMixin:
             raise ValueError(f"成功实验批次不可标记失败: {run_id}")
         raise ValueError(f"实验批次状态不可标记失败: {run_id}/{current[0]}")
 
+    def record_failed_experiment_attempt(
+        self,
+        *,
+        run_id: str,
+        as_of: str | None,
+        strategy_name: str,
+        created_at: str,
+        finished_at: str,
+        error_json: str | None,
+    ) -> None:
+        """记录尚未形成候选池就失败的尝试，不伪造实验元数据。"""
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id 不可为空")
+        if not isinstance(strategy_name, str) or not strategy_name.strip():
+            raise ValueError("strategy_name 不可为空")
+        current = self.experiment_run(run_id)
+        if current is not None:
+            self.fail_experiment_run(run_id, finished_at, error_json)
+            return
+        self.con.execute(
+            """
+            INSERT INTO experiment_runs (
+                run_id, as_of, status, strategy_name,
+                created_at, finished_at, error_json
+            ) VALUES (?, ?, 'failed', ?, ?, ?, ?)
+            """,
+            [run_id, as_of, strategy_name, created_at, finished_at, error_json],
+        )
+
     @staticmethod
     def _validated_decisions(
         run_row: Mapping[str, Any], decisions: pd.DataFrame
     ) -> pd.DataFrame:
         run_id = str(run_row["run_id"])
         if decisions is None or decisions.empty:
-            raise ValueError("实验明细必须包含 rule、ai、hybrid、benchmark 四组")
+            raise ValueError("实验明细至少要包含一个可用实验组")
         unknown = set(decisions.columns) - set(_DECISION_COLUMNS)
         if unknown:
             raise ValueError(f"非法实验明细字段: {sorted(unknown)}")
@@ -243,24 +267,23 @@ class ExperimentMixin:
         if run_ids != {run_id}:
             raise ValueError("实验明细混入其他 run_id")
         groups = set(decisions["group_name"].tolist())
-        if groups != _REQUIRED_GROUPS:
-            raise ValueError(
-                "实验明细四组必须精确为 rule、ai、hybrid、benchmark"
-            )
+        unknown_groups = groups - _REQUIRED_GROUPS
+        if unknown_groups:
+            raise ValueError(f"实验明细包含未知组: {sorted(unknown_groups)}")
         if decisions.duplicated(["group_name", "ts_code"]).any():
             raise ValueError("实验组内包含重复 ts_code")
 
         counts = decisions.groupby("group_name", dropna=False).size().to_dict()
-        expected_counts = {
+        maximum_counts = {
             "rule": run_row["final_count"],
             "ai": run_row["final_count"],
             "hybrid": run_row["final_count"],
             "benchmark": run_row["candidate_count"],
         }
         mismatches = [
-            f"{group_name}={counts.get(group_name, 0)}/{expected}"
-            for group_name, expected in expected_counts.items()
-            if counts.get(group_name, 0) != expected
+            f"{group_name}={count}/{maximum_counts[group_name]}"
+            for group_name, count in counts.items()
+            if count < 1 or count > maximum_counts[group_name]
         ]
         if mismatches:
             raise ValueError(f"实验明细组行数不符合批次元数据: {', '.join(mismatches)}")
@@ -285,10 +308,54 @@ class ExperimentMixin:
         if mismatches:
             raise ValueError(f"实验批次审计元数据不一致: {', '.join(mismatches)}")
 
-    def record_experiment(
-        self, run_row: Mapping[str, Any], decisions: pd.DataFrame
+    def _finish_task_in_transaction(
+        self, run_id: str, completion: Mapping[str, Any]
     ) -> None:
-        """在一个事务中写全四组明细，最后才把批次标为成功。"""
+        required = {"task_id", "now", "trade_date", "result_json"}
+        missing = required - set(completion)
+        if missing:
+            raise ValueError(f"任务完成信息缺少字段: {sorted(missing)}")
+        task_id = completion["task_id"]
+        if task_id != run_id:
+            raise ValueError("任务 task_id 必须与实验 run_id 一致")
+        for field_name in ("now", "trade_date", "result_json"):
+            value = completion[field_name]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"任务完成信息 {field_name} 不可为空")
+
+        current = self.con.execute(
+            "SELECT status FROM task_runs WHERE task_id = ?", [task_id]
+        ).fetchone()
+        if current is None:
+            raise KeyError(f"任务不存在: {task_id}")
+        if current[0] not in ("running", "succeeded"):
+            raise ValueError(f"任务状态不可标记成功: {task_id}/{current[0]}")
+        self._rebind_task_claim_in_transaction(task_id, completion["trade_date"])
+        self.con.execute(
+            """
+            UPDATE task_runs
+            SET status = 'succeeded', finished_at = ?, heartbeat_at = ?,
+                result_json = ?, error_json = NULL, trade_date = ?
+            WHERE task_id = ?
+            """,
+            [
+                completion["now"],
+                completion["now"],
+                completion["result_json"],
+                completion["trade_date"],
+                task_id,
+            ],
+        )
+
+    def record_experiment(
+        self,
+        run_row: Mapping[str, Any],
+        decisions: pd.DataFrame,
+        *,
+        task_completion: Mapping[str, Any] | None = None,
+        scan_completion: Mapping[str, Any] | None = None,
+    ) -> None:
+        """原子写入扫描、选股、四组实验和任务成功状态。"""
         self._validate_run_row(run_row)
         run_id = str(run_row["run_id"])
         staged = self._validated_decisions(run_row, decisions)
@@ -312,6 +379,8 @@ class ExperimentMixin:
             if current is not None:
                 self._validate_existing_audit_metadata(run_row, current[1:])
             if current is not None and current[0] == "succeeded":
+                if task_completion is not None:
+                    self._finish_task_in_transaction(run_id, task_completion)
                 self.con.execute("COMMIT")
                 started = False
                 return
@@ -319,6 +388,25 @@ class ExperimentMixin:
                 raise ValueError(f"失败实验批次不可复用 run_id: {run_id}")
             if current is None:
                 self._insert_experiment_run(run_row)
+
+            if scan_completion is not None:
+                required_scan = {"run_row", "rows", "picks", "as_of", "strategy"}
+                missing_scan = required_scan - set(scan_completion)
+                if missing_scan:
+                    raise ValueError(
+                        f"扫描完成信息缺少字段: {sorted(missing_scan)}"
+                    )
+                scan_run = scan_completion["run_row"]
+                if scan_run.get("run_id") != run_id:
+                    raise ValueError("扫描 run_id 必须与实验 run_id 一致")
+                self._record_scan_in_transaction(
+                    scan_run, scan_completion["rows"]
+                )
+                self._replace_picks_in_transaction(
+                    str(scan_completion["as_of"]),
+                    str(scan_completion["strategy"]),
+                    scan_completion["picks"],
+                )
 
             self.con.register(_DECISIONS_STAGE, staged)
             registered = True
@@ -340,6 +428,8 @@ class ExperimentMixin:
                 """,
                 [run_row.get("finished_at"), run_row.get("error_json"), run_id],
             )
+            if task_completion is not None:
+                self._finish_task_in_transaction(run_id, task_completion)
             self.con.execute("COMMIT")
             started = False
         except Exception:
@@ -374,72 +464,95 @@ class ExperimentMixin:
             [run_id],
         ).df()
 
-    def pending_experiment_decisions(self) -> pd.DataFrame:
-        """读取仍需确定成交或回填收益的成功实验明细。"""
-        columns = ", ".join(f"d.{column}" for column in _DECISION_COLUMNS)
+    def experiment_entries_awaiting_limits(self) -> pd.DataFrame:
+        """成功批次里成交结果还没定下来的四组明细。
+
+        成交只有两种终局:买到了(``entry_price`` 有值)、买不到(涨停封板或当天
+        没有 K 线)。两者都没出现就说明还缺行情或涨跌停价,需要继续补数据。
+        ``experiment_returns`` 里同一条决策的 10 个 horizon 共享同一次成交,
+        所以只要存在任意一行落到终局就算定了。
+        """
+        unavailable = ", ".join(f"'{status}'" for status in _ENTRY_UNAVAILABLE_STATUSES)
         return self.con.execute(
             f"""
-            SELECT {columns}
+            SELECT d.run_id, r.as_of, d.group_name, d.ts_code
             FROM experiment_decisions d
             JOIN experiment_runs r ON r.run_id = d.run_id
             WHERE r.status = 'succeeded'
-              AND (
-                  d.entry_status IS NULL
-                  OR d.entry_status = 'pending_entry'
-                  OR (
-                      d.entry_status = 'filled'
-                      AND (
-                          d.ret1_status IS NULL OR d.ret1_status IN (
-                              'future_not_reached', 'calendar_missing', 'target_bar_missing'
-                          )
-                          OR d.ret3_status IS NULL OR d.ret3_status IN (
-                              'future_not_reached', 'calendar_missing', 'target_bar_missing'
-                          )
-                          OR d.ret5_status IS NULL OR d.ret5_status IN (
-                              'future_not_reached', 'calendar_missing', 'target_bar_missing'
-                          )
-                          OR d.ret10_status IS NULL OR d.ret10_status IN (
-                              'future_not_reached', 'calendar_missing', 'target_bar_missing'
-                          )
-                      )
-                  )
+              AND NOT EXISTS (
+                  SELECT 1 FROM experiment_returns e
+                  WHERE e.run_id = d.run_id
+                    AND e.group_name = d.group_name
+                    AND e.ts_code = d.ts_code
+                    AND (
+                        e.entry_price IS NOT NULL
+                        OR e.status IN ({unavailable})
+                    )
               )
             ORDER BY d.run_id ASC, d.group_name ASC, d.rank ASC NULLS LAST,
                      d.ts_code ASC
             """
         ).df()
 
-    def update_experiment_decision(
-        self,
-        run_id: str,
-        group_name: str,
-        ts_code: str,
-        **fields: Any,
-    ) -> None:
-        """严格按白名单回填成交与收益字段。"""
-        if not fields:
-            raise ValueError("没有提供实验明细更新字段")
-        invalid = set(fields) - _UPDATABLE_DECISION_FIELDS
-        if invalid:
-            raise ValueError(f"非法实验明细字段: {sorted(invalid)}")
-        exists = self.con.execute(
-            """
-            SELECT 1 FROM experiment_decisions
-            WHERE run_id = ? AND group_name = ? AND ts_code = ?
-            """,
-            [run_id, group_name, ts_code],
-        ).fetchone()
-        if exists is None:
-            raise KeyError(f"实验明细不存在: {run_id}/{group_name}/{ts_code}")
-
-        assignments = ", ".join(f"{column} = ?" for column in fields)
-        self.con.execute(
-            f"""
-            UPDATE experiment_decisions SET {assignments}
-            WHERE run_id = ? AND group_name = ? AND ts_code = ?
-            """,
-            [*fields.values(), run_id, group_name, ts_code],
+    def upsert_experiment_returns(self, rows: list[Mapping[str, Any]]) -> int:
+        """按 (批次, 组, 股票, horizon) 幂等替换收益明细。"""
+        if not rows:
+            return 0
+        columns = (
+            "run_id", "group_name", "ts_code", "horizon", "entry_date",
+            "entry_price", "sell_date", "sell_session", "sell_price", "status",
+            "reason", "gross_return", "created_at", "updated_at",
         )
+        frame = pd.DataFrame([{column: row.get(column) for column in columns} for row in rows])
+        self.upsert("experiment_returns", frame, keys=("run_id", "group_name", "ts_code", "horizon"))
+        return len(frame)
+
+    def experiment_returns(
+        self,
+        *,
+        run_id: str | None = None,
+        group_name: str | None = None,
+        ts_code: str | None = None,
+        horizon: str | None = None,
+        as_of: str | None = None,
+        entry_status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """按稳定键序读收益明细。
+
+        ``as_of`` 走 experiment_runs 的信号日,``entry_status`` 走成交状态,
+        两个筛选和台账页的筛选条件同口径,避免页面上出现第二套算法。
+        """
+        conditions: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("run_id", run_id),
+            ("group_name", group_name),
+            ("ts_code", ts_code),
+            ("horizon", horizon),
+        ):
+            if value is not None:
+                conditions.append(f"e.{column} = ?")
+                params.append(value)
+        if as_of is not None:
+            conditions.append(
+                "e.run_id IN (SELECT run_id FROM experiment_runs WHERE as_of = ?)"
+            )
+            params.append(as_of)
+        if entry_status is not None:
+            conditions.append(entry_status_predicate(entry_status, alias="e"))
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        cursor = self.con.execute(
+            f"SELECT e.* FROM experiment_returns e{where}"
+            " ORDER BY e.run_id, e.group_name, e.ts_code, e.horizon",
+            params,
+        )
+        columns = [item[0] for item in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
-__all__ = ["ExperimentMixin"]
+__all__ = [
+    "ExperimentMixin",
+    "ENTRY_STATUSES",
+    "classify_entry_status",
+    "entry_status_predicate",
+]

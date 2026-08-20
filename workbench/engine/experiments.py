@@ -1,4 +1,4 @@
-"""实验四组构造、候选池指纹与真实收益回填。"""
+"""实验四组构造、候选池指纹与买入日涨跌停缺口检查。"""
 
 from __future__ import annotations
 
@@ -6,29 +6,16 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Any
 
 import pandas as pd
 
 from .db_experiments import _DECISION_COLUMNS
+from .security import redact_secrets
 
 
 _REQUIRED_SCAN_COLUMNS = ("ts_code", "name", "industry", "total", "rank")
-_HORIZONS = {"ret1": 1, "ret3": 3, "ret5": 5, "ret10": 10}
-_LIMIT_TOLERANCE = 1e-6
-
-
-@dataclass(frozen=True)
-class BackfillSummary:
-    """本轮实际发生的回填变化计数。"""
-
-    updated: int = 0
-    filled: int = 0
-    pending: int = 0
-    unavailable: int = 0
-    return_filled: int = 0
 
 
 def _as_frame(rows: Any, label: str) -> pd.DataFrame:
@@ -100,7 +87,7 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value
+        return redact_secrets(value)
     if isinstance(value, int):
         return value
     if isinstance(value, float):
@@ -152,16 +139,13 @@ def _validated_agent_rows(
     key: str,
     pool_codes: set[str],
     *,
-    exact_count: int | None = None,
-    minimum_count: int | None = None,
+    maximum_count: int | None = None,
 ) -> list[dict[str, Any]]:
     raw = agent_result.get(key)
     if not isinstance(raw, list):
         raise ValueError(f"agent_result.{key} 必须是列表")
-    if exact_count is not None and len(raw) != exact_count:
-        raise ValueError(f"agent_result.{key} 必须恰好包含 {exact_count} 只股票")
-    if minimum_count is not None and len(raw) < minimum_count:
-        raise ValueError(f"agent_result.{key} 必须至少包含 {minimum_count} 只股票")
+    if maximum_count is not None and len(raw) > maximum_count:
+        raise ValueError(f"agent_result.{key} 不可超过 {maximum_count} 只股票")
 
     output: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -223,27 +207,24 @@ def _base_decision(run_id: str, group_name: str, row: Mapping[str, Any]) -> dict
         name=row["name"],
         industry=row["industry"],
         rule_score=float(row["total"]),
-        entry_status="pending_entry",
     )
-    for horizon in _HORIZONS:
-        decision[f"{horizon}_status"] = "future_not_reached"
     return decision
 
 
 def build_experiment_decisions(
     run_id: str,
     scan_rows: Any,
-    agent_result: Mapping[str, Any],
+    agent_result: Mapping[str, Any] | None,
     final_count: int,
     rule_weight: float = 0.5,
     ai_weight: float = 0.5,
 ) -> tuple[str, pd.DataFrame]:
-    """从同一个冻结候选池生成 rule/ai/hybrid/benchmark 四组明细。"""
+    """从冻结候选池生成当前可用的实验组。"""
     if not isinstance(run_id, str) or not run_id.strip():
         raise ValueError("run_id 不可为空")
     if isinstance(final_count, bool) or not isinstance(final_count, Integral) or final_count <= 0:
         raise ValueError("final_count 必须是正整数")
-    if not isinstance(agent_result, Mapping):
+    if agent_result is not None and not isinstance(agent_result, Mapping):
         raise ValueError("agent_result 必须是对象")
 
     rule_weight_value = _finite_number(rule_weight, "混合权重")
@@ -256,23 +237,28 @@ def build_experiment_decisions(
         raise ValueError("混合权重之和必须为 1")
 
     pool = _validated_scan_rows(scan_rows)
-    if len(pool) < final_count:
-        raise ValueError("冻结候选池数量不可少于 final_count")
+    effective_final_count = min(final_count, len(pool))
     pool_hash = candidate_pool_hash(pool)
     pool_by_code = {row["ts_code"]: row for row in pool.to_dict("records")}
     pool_codes = set(pool_by_code)
-    final_rows = _validated_agent_rows(
-        agent_result, "final", pool_codes, exact_count=final_count
-    )
-    deep_rows = _validated_agent_rows(
-        agent_result, "deep", pool_codes, minimum_count=final_count
-    )
+    final_rows: list[dict[str, Any]] = []
+    deep_rows: list[dict[str, Any]] = []
+    if agent_result is not None:
+        final_rows = _validated_agent_rows(
+            agent_result, "final", pool_codes, maximum_count=effective_final_count
+        )
+        deep_rows = _validated_agent_rows(
+            agent_result, "deep", pool_codes, maximum_count=len(pool)
+        )
+        deep_codes = {item["ts_code"] for item in deep_rows}
+        if not {item["ts_code"] for item in final_rows} <= deep_codes:
+            raise ValueError("agent_result.final 必须是 deep 的子集")
 
     decisions: list[dict[str, Any]] = []
 
     rule_sorted = pool.sort_values(
         ["total", "ts_code"], ascending=[False, True], kind="mergesort"
-    ).head(final_count)
+    ).head(effective_final_count)
     for rank, row in enumerate(rule_sorted.to_dict("records"), start=1):
         decision = _base_decision(run_id, "rule", row)
         decision.update(rank=rank, reason_json=_scan_reason(row))
@@ -290,42 +276,43 @@ def build_experiment_decisions(
         )
         decisions.append(decision)
 
-    hybrid = pd.DataFrame(
-        [
-            {
-                "ts_code": item["ts_code"],
-                "rule_score": pool_by_code[item["ts_code"]]["total"],
-                "ai_score": item["score"],
-                "agent_item": item,
-            }
-            for item in deep_rows
-        ]
-    )
-    hybrid["rule_percentile"] = hybrid["rule_score"].rank(
-        method="average", pct=True
-    )
-    hybrid["ai_percentile"] = hybrid["ai_score"].rank(
-        method="average", pct=True
-    )
-    hybrid["hybrid_score"] = (
-        rule_weight_value * hybrid["rule_percentile"]
-        + ai_weight_value * hybrid["ai_percentile"]
-    )
-    hybrid = hybrid.sort_values(
-        ["hybrid_score", "ts_code"], ascending=[False, True], kind="mergesort"
-    ).head(final_count)
-    for rank, item in enumerate(hybrid.to_dict("records"), start=1):
-        row = pool_by_code[item["ts_code"]]
-        agent_item = item["agent_item"]
-        decision = _base_decision(run_id, "hybrid", row)
-        decision.update(
-            rank=rank,
-            ai_score=float(item["ai_score"]),
-            hybrid_score=float(item["hybrid_score"]),
-            reason_json=_agent_reason(agent_item, final=False),
-            risk_json=_strict_json(agent_item.get("risks")),
+    if deep_rows:
+        hybrid = pd.DataFrame(
+            [
+                {
+                    "ts_code": item["ts_code"],
+                    "rule_score": pool_by_code[item["ts_code"]]["total"],
+                    "ai_score": item["score"],
+                    "agent_item": item,
+                }
+                for item in deep_rows
+            ]
         )
-        decisions.append(decision)
+        hybrid["rule_percentile"] = hybrid["rule_score"].rank(
+            method="average", pct=True
+        )
+        hybrid["ai_percentile"] = hybrid["ai_score"].rank(
+            method="average", pct=True
+        )
+        hybrid["hybrid_score"] = (
+            rule_weight_value * hybrid["rule_percentile"]
+            + ai_weight_value * hybrid["ai_percentile"]
+        )
+        hybrid = hybrid.sort_values(
+            ["hybrid_score", "ts_code"], ascending=[False, True], kind="mergesort"
+        ).head(effective_final_count)
+        for rank, item in enumerate(hybrid.to_dict("records"), start=1):
+            row = pool_by_code[item["ts_code"]]
+            agent_item = item["agent_item"]
+            decision = _base_decision(run_id, "hybrid", row)
+            decision.update(
+                rank=rank,
+                ai_score=float(item["ai_score"]),
+                hybrid_score=float(item["hybrid_score"]),
+                reason_json=_agent_reason(agent_item, final=False),
+                risk_json=_strict_json(agent_item.get("risks")),
+            )
+            decisions.append(decision)
 
     benchmark = pool.sort_values(
         ["total", "ts_code"], ascending=[False, True], kind="mergesort"
@@ -338,22 +325,14 @@ def build_experiment_decisions(
     return pool_hash, pd.DataFrame(decisions, columns=_DECISION_COLUMNS)
 
 
-def _run_as_of(store: Any, run_id: str, cache: dict[str, str]) -> str:
-    if run_id not in cache:
-        run = store.experiment_run(run_id)
-        if run is None:
-            raise RuntimeError(f"实验批次不存在: {run_id}")
-        cache[run_id] = run["as_of"]
-    return cache[run_id]
-
-
 def required_entry_limit_dates(store: Any, exchange: str = "SSE") -> list[str]:
-    """列出已到 entry 日、但仍缺权威涨跌停覆盖的历史日期。
+    """列出已到买入日、但仍缺权威涨跌停覆盖的历史日期。
 
-    一键编排必须在 ``backfill_experiment_returns`` 前调用本函数，并把结果交给
-    ``ingest_daily_limits``；否则隔日未运行的实验会一直缺历史涨跌停价。
+    一键编排必须在 ``calculate_experiment_returns`` 前调用本函数，并把结果交给
+    ``ingest_daily_limits``；否则隔日未运行的实验会一直缺历史涨跌停价，成交状态
+    就永远停在 ``pending_entry``。
     """
-    rows = store.pending_experiment_decisions()
+    rows = store.experiment_entries_awaiting_limits()
     if rows.empty:
         return []
     data_max = store.latest_date()
@@ -362,54 +341,22 @@ def required_entry_limit_dates(store: Any, exchange: str = "SSE") -> list[str]:
 
     needed: set[str] = set()
     coverage: dict[tuple[str, str], bool] = {}
-    run_dates: dict[str, str] = {}
-    pending_entries = rows[
-        rows["entry_status"].isna() | rows["entry_status"].eq("pending_entry")
-    ]
-    for _, row in pending_entries.iterrows():
-        as_of = _run_as_of(store, row["run_id"], run_dates)
-        entry_date = store.sessions_after(exchange, as_of, 1)
+    entry_dates: dict[str, str | None] = {}
+    for _, row in rows.iterrows():
+        as_of = row["as_of"]
+        if as_of not in entry_dates:
+            entry_dates[as_of] = store.sessions_after(exchange, as_of, 1)
+        entry_date = entry_dates[as_of]
         if entry_date is None or entry_date > data_max:
             continue
         coverage_key = (row["ts_code"], entry_date)
         if coverage_key not in coverage:
             coverage[coverage_key] = (
-                store.con.execute(
-                    """
-                    SELECT 1 FROM daily_limit
-                    WHERE ts_code = ? AND trade_date = ?
-                    """,
-                    [row["ts_code"], entry_date],
-                ).fetchone()
-                is not None
+                _up_limit(store, row["ts_code"], entry_date) is not None
             )
         if not coverage[coverage_key]:
             needed.add(entry_date)
     return sorted(needed)
-
-
-def _sessions_after(store: Any, exchange: str, as_of: str) -> list[str]:
-    return [
-        row[0]
-        for row in store.con.execute(
-            """
-            SELECT cal_date FROM trade_cal
-            WHERE exchange = ? AND is_open = 1 AND cal_date > ?
-            ORDER BY cal_date ASC LIMIT 10
-            """,
-            [exchange, as_of],
-        ).fetchall()
-    ]
-
-
-def _daily_bar(store: Any, ts_code: str, trade_date: str) -> tuple[Any, ...] | None:
-    return store.con.execute(
-        """
-        SELECT open, high, low, close FROM daily
-        WHERE ts_code = ? AND trade_date = ?
-        """,
-        [ts_code, trade_date],
-    ).fetchone()
 
 
 def _up_limit(store: Any, ts_code: str, trade_date: str) -> float | None:
@@ -429,176 +376,8 @@ def _up_limit(store: Any, ts_code: str, trade_date: str) -> float | None:
     return value if math.isfinite(value) and value > 0 else None
 
 
-def _valid_price(value: Any) -> bool:
-    try:
-        price = float(value)
-    except (TypeError, ValueError):
-        return False
-    return math.isfinite(price) and price > 0
-
-
-def _unavailable_fields(reason: str, sessions: list[str]) -> dict[str, Any]:
-    fields: dict[str, Any] = {
-        "entry_price": None,
-        "entry_status": "entry_unavailable",
-        "entry_reason": reason,
-    }
-    for name, number in _HORIZONS.items():
-        fields[name] = None
-        fields[f"{name}_target_date"] = (
-            sessions[number - 1] if len(sessions) >= number else None
-        )
-        fields[f"{name}_status"] = "entry_unavailable"
-        fields[f"{name}_reason"] = reason
-    return fields
-
-
-def _pending_entry_fields(
-    reason: str, sessions: list[str], data_max: str | None
-) -> dict[str, Any]:
-    fields: dict[str, Any] = {
-        "entry_price": None,
-        "entry_status": "pending_entry",
-        "entry_reason": reason,
-    }
-    for name, number in _HORIZONS.items():
-        target = sessions[number - 1] if len(sessions) >= number else None
-        fields[name] = None
-        fields[f"{name}_target_date"] = target
-        if target is None:
-            fields[f"{name}_status"] = "calendar_missing"
-            fields[f"{name}_reason"] = "calendar_missing"
-        elif data_max is None or target > data_max:
-            fields[f"{name}_status"] = "future_not_reached"
-            fields[f"{name}_reason"] = None
-    return fields
-
-
-def _current_value(value: Any) -> Any:
-    return None if _is_missing(value) else value
-
-
-def _different(current: Any, desired: Any) -> bool:
-    left = _current_value(current)
-    right = _current_value(desired)
-    if left is None or right is None:
-        return left is not right
-    return left != right
-
-
-def backfill_experiment_returns(store: Any, exchange: str = "SSE") -> BackfillSummary:
-    """按信号日后的市场交易日和同一个次日开盘价回填实验收益。"""
-    pending_rows = store.pending_experiment_decisions()
-    if pending_rows.empty:
-        return BackfillSummary()
-
-    data_max = store.latest_date()
-    run_dates: dict[str, str] = {}
-    updated = filled = pending = unavailable = return_filled = 0
-
-    for _, row in pending_rows.iterrows():
-        ts_code = row["ts_code"]
-        as_of = _run_as_of(store, row["run_id"], run_dates)
-        sessions = _sessions_after(store, exchange, as_of)
-        entry_date = sessions[0] if sessions else None
-        desired: dict[str, Any] = {"entry_date": entry_date}
-
-        if entry_date is None:
-            desired.update(_pending_entry_fields("calendar_missing", sessions, data_max))
-        elif data_max is None or entry_date > data_max:
-            desired.update(_pending_entry_fields("future_not_reached", sessions, data_max))
-        else:
-            bar = _daily_bar(store, ts_code, entry_date)
-            if bar is None:
-                desired.update(_unavailable_fields("entry_bar_missing", sessions))
-            elif not _valid_price(bar[0]):
-                desired.update(_unavailable_fields("invalid_open", sessions))
-            else:
-                up_limit = _up_limit(store, ts_code, entry_date)
-                if up_limit is None:
-                    # 涨停价以后补齐后必须能重试，因此不把收益状态改成终态。
-                    desired.update(
-                        entry_price=None,
-                        entry_status="pending_entry",
-                        entry_reason="limit_price_missing",
-                    )
-                elif all(
-                    _valid_price(price)
-                    and math.isclose(
-                        float(price), up_limit, rel_tol=0.0, abs_tol=_LIMIT_TOLERANCE
-                    )
-                    for price in bar
-                ):
-                    desired.update(_unavailable_fields("limit_up_locked", sessions))
-                else:
-                    entry_price = float(bar[0])
-                    desired.update(
-                        entry_price=entry_price,
-                        entry_status="filled",
-                        entry_reason=None,
-                    )
-                    for name, number in _HORIZONS.items():
-                        target = sessions[number - 1] if len(sessions) >= number else None
-                        desired[name] = None
-                        desired[f"{name}_target_date"] = target
-                        if target is None:
-                            desired[f"{name}_status"] = "calendar_missing"
-                            desired[f"{name}_reason"] = "calendar_missing"
-                        elif data_max is None or target > data_max:
-                            desired[f"{name}_status"] = "future_not_reached"
-                            desired[f"{name}_reason"] = None
-                        else:
-                            target_bar = _daily_bar(store, ts_code, target)
-                            close = target_bar[3] if target_bar is not None else None
-                            if not _valid_price(close):
-                                desired[f"{name}_status"] = "target_bar_missing"
-                                desired[f"{name}_reason"] = "target_bar_missing"
-                            else:
-                                desired[name] = float(close) / entry_price - 1.0
-                                desired[f"{name}_status"] = "filled"
-                                desired[f"{name}_reason"] = None
-
-        changes = {
-            field: value
-            for field, value in desired.items()
-            if _different(row.get(field), value)
-        }
-        if not changes:
-            continue
-
-        old_entry_status = _current_value(row.get("entry_status"))
-        new_entry_status = desired.get("entry_status", old_entry_status)
-        if new_entry_status == "filled" and old_entry_status != "filled":
-            filled += 1
-        elif new_entry_status == "pending_entry":
-            pending += 1
-        elif new_entry_status == "entry_unavailable" and old_entry_status != "entry_unavailable":
-            unavailable += 1
-        for name in _HORIZONS:
-            if (
-                desired.get(f"{name}_status") == "filled"
-                and _current_value(row.get(f"{name}_status")) != "filled"
-            ):
-                return_filled += 1
-
-        store.update_experiment_decision(
-            row["run_id"], row["group_name"], ts_code, **changes
-        )
-        updated += 1
-
-    return BackfillSummary(
-        updated=updated,
-        filled=filled,
-        pending=pending,
-        unavailable=unavailable,
-        return_filled=return_filled,
-    )
-
-
 __all__ = [
-    "BackfillSummary",
     "candidate_pool_hash",
     "build_experiment_decisions",
     "required_entry_limit_dates",
-    "backfill_experiment_returns",
 ]

@@ -9,6 +9,12 @@ import pandas as pd
 import pytest
 
 from engine.db import Store
+from engine.db_experiments import (
+    ENTRY_STATUSES,
+    classify_entry_status,
+    entry_status_predicate,
+)
+from engine.schema import _LEGACY_DECISION_COLUMNS
 
 
 GROUPS = {"rule", "ai", "hybrid", "benchmark"}
@@ -43,26 +49,6 @@ DECISION_COLUMNS = {
     "hybrid_score",
     "reason_json",
     "risk_json",
-    "entry_date",
-    "entry_price",
-    "entry_status",
-    "entry_reason",
-    "ret1",
-    "ret1_target_date",
-    "ret1_status",
-    "ret1_reason",
-    "ret3",
-    "ret3_target_date",
-    "ret3_status",
-    "ret3_reason",
-    "ret5",
-    "ret5_target_date",
-    "ret5_status",
-    "ret5_reason",
-    "ret10",
-    "ret10_target_date",
-    "ret10_status",
-    "ret10_reason",
 }
 
 
@@ -72,10 +58,11 @@ def _run_row(
     status: str = "running",
     candidate_count: int = 1,
     final_count: int = 1,
+    as_of: str = "20260804",
 ) -> dict:
     return {
         "run_id": run_id,
-        "as_of": "20260804",
+        "as_of": as_of,
         "data_cutoff_at": "2026-08-04T15:30:00+08:00",
         "status": status,
         "strategy_name": "hermes",
@@ -110,26 +97,6 @@ def _decisions(run_id: str) -> pd.DataFrame:
                 "hybrid_score": 85.0 - index,
                 "reason_json": json.dumps({"group": group_name}, ensure_ascii=False),
                 "risk_json": None if group_name == "rule" else "[]",
-                "entry_date": None,
-                "entry_price": None,
-                "entry_status": "pending_entry",
-                "entry_reason": None,
-                "ret1": None,
-                "ret1_target_date": None,
-                "ret1_status": "future_not_reached",
-                "ret1_reason": None,
-                "ret3": None,
-                "ret3_target_date": None,
-                "ret3_status": "future_not_reached",
-                "ret3_reason": None,
-                "ret5": None,
-                "ret5_target_date": None,
-                "ret5_status": "future_not_reached",
-                "ret5_reason": None,
-                "ret10": None,
-                "ret10_target_date": None,
-                "ret10_status": "future_not_reached",
-                "ret10_reason": None,
             }
         )
     return pd.DataFrame(rows)
@@ -195,13 +162,11 @@ def test_four_groups_commit_in_one_transaction(tmp_path):
         assert saved["group_name"].tolist() == ["ai", "benchmark", "hybrid", "rule"]
 
 
-@pytest.mark.parametrize("case", ["missing", "extra", "mixed_run_id"])
+@pytest.mark.parametrize("case", ["extra", "mixed_run_id"])
 def test_invalid_group_batch_rolls_back_without_marking_success(tmp_path, case):
     run_id = f"bad-{case}"
     rows = _decisions(run_id)
-    if case == "missing":
-        rows = rows[rows["group_name"] != "benchmark"].copy()
-    elif case == "extra":
+    if case == "extra":
         extra = rows.iloc[[0]].copy()
         extra["group_name"] = "other"
         extra["ts_code"] = "999999.SZ"
@@ -216,6 +181,23 @@ def test_invalid_group_batch_rolls_back_without_marking_success(tmp_path, case):
 
         assert store.experiment_decisions(run_id).empty
         assert store.experiment_run(run_id)["status"] == "running"
+
+
+def test_partial_group_batch_commits_available_groups(tmp_path):
+    run_id = "partial-groups"
+    rows = _decisions(run_id)
+    rows = rows[rows["group_name"].isin({"rule", "benchmark"})].copy()
+    run_row = _run_row(run_id)
+    run_row["model"] = None
+
+    with Store(tmp_path / "partial-groups.duckdb") as store:
+        store.record_experiment(run_row, rows)
+
+        assert store.experiment_run(run_id)["status"] == "succeeded"
+        assert set(store.experiment_decisions(run_id)["group_name"]) == {
+            "rule",
+            "benchmark",
+        }
 
 
 def test_database_error_rolls_back_run_and_decisions(tmp_path):
@@ -240,9 +222,7 @@ def test_database_error_rolls_back_run_and_decisions(tmp_path):
 @pytest.mark.parametrize(
     ("case", "candidate_count", "final_count"),
     [
-        ("selected-missing", 2, 2),
         ("selected-extra", 2, 1),
-        ("benchmark-missing", 2, 1),
         ("benchmark-extra", 1, 1),
     ],
 )
@@ -326,6 +306,153 @@ def test_duplicate_record_is_idempotent_and_does_not_overwrite_success(tmp_path)
         assert saved["candidate_count"] == 1
 
 
+def _task_completion(task_id: str) -> dict:
+    return {
+        "task_id": task_id,
+        "now": "2026-08-04T15:40:00+08:00",
+        "trade_date": "20260804",
+        "result_json": json.dumps({"run_id": task_id}),
+    }
+
+
+def _scan_completion(run_id: str, *, selected: bool = True) -> dict:
+    scan_run = {
+        "run_id": run_id,
+        "run_date": "20260804153200",
+        "as_of": "20260804",
+        "strategy": "hermes",
+        "candidate_count": 1,
+        "scored_count": 1,
+        "passed_count": int(selected),
+        "final_count": int(selected),
+        "top_industries_json": "[]",
+    }
+    scan_rows = pd.DataFrame(
+        [
+            {
+                "run_id": run_id,
+                "ts_code": "000001.SZ",
+                "name": "样本",
+                "industry": "测试",
+                "rank": 1,
+                "total": 1.0,
+                "passed": selected,
+                "selected": selected,
+                "gate_reasons_json": "[]",
+                "cat_scores_json": "{}",
+                "money_class": "确认",
+                "one_line": "样本",
+                "contrib_json": "{}",
+                "feat_json": "{}",
+            }
+        ]
+    )
+    picks = pd.DataFrame(
+        [
+            {
+                "run_date": "20260804",
+                "as_of": "20260804",
+                "strategy": "hermes",
+                "ts_code": "000001.SZ",
+                "name": "样本",
+                "industry": "测试",
+                "rank": 1,
+                "total": 1.0,
+                "money_class": "确认",
+                "one_line": "样本",
+                "contrib_json": "{}",
+                "feat_json": "{}",
+            }
+        ]
+        if selected
+        else []
+    )
+    return {
+        "run_row": scan_run,
+        "rows": scan_rows,
+        "picks": picks,
+        "as_of": "20260804",
+        "strategy": "hermes",
+    }
+
+
+def test_experiment_and_task_success_commit_in_one_transaction(tmp_path):
+    with Store(tmp_path / "atomic-success.duckdb") as store:
+        claimed, _ = store.claim_task(
+            task_id="atomic-success",
+            kind="one_click_pipeline",
+            trade_date="20260804",
+            strategy="hermes",
+            now="2026-08-04T15:31:00+08:00",
+        )
+        assert claimed is True
+        store.mark_task_running("atomic-success", "2026-08-04T15:32:00+08:00")
+        store.create_experiment_run(_run_row("atomic-success"))
+
+        store.record_experiment(
+            _run_row("atomic-success"),
+            _decisions("atomic-success"),
+            task_completion=_task_completion("atomic-success"),
+            scan_completion=_scan_completion("atomic-success"),
+        )
+
+        experiment = store.experiment_run("atomic-success")
+        task = store.get_task("atomic-success")
+        assert experiment["status"] == "succeeded"
+        assert len(store.experiment_decisions("atomic-success")) == 4
+        assert task["status"] == "succeeded"
+        assert task["trade_date"] == "20260804"
+        assert json.loads(task["result_json"])["run_id"] == "atomic-success"
+        assert store.latest_scan_run().iloc[0]["run_id"] == "atomic-success"
+        assert store.con.execute("SELECT COUNT(*) FROM picks").fetchone()[0] == 1
+
+
+def test_missing_task_rolls_back_experiment_success(tmp_path):
+    with Store(tmp_path / "atomic-rollback.duckdb") as store:
+        store.create_experiment_run(_run_row("atomic-rollback"))
+
+        with pytest.raises(KeyError, match="任务"):
+            store.record_experiment(
+                _run_row("atomic-rollback"),
+                _decisions("atomic-rollback"),
+                task_completion=_task_completion("atomic-rollback"),
+                scan_completion=_scan_completion("atomic-rollback"),
+            )
+
+        assert store.experiment_run("atomic-rollback")["status"] == "running"
+        assert store.experiment_decisions("atomic-rollback").empty
+        assert store.latest_scan_run().empty
+        assert store.con.execute("SELECT COUNT(*) FROM picks").fetchone()[0] == 0
+
+
+def test_empty_final_selection_clears_old_picks_in_atomic_completion(tmp_path):
+    with Store(tmp_path / "empty-picks.duckdb") as store:
+        old = _scan_completion("old-success")
+        store.record_scan(old["run_row"], old["rows"])
+        store.replace_picks(old["as_of"], old["strategy"], old["picks"])
+        claimed, _ = store.claim_task(
+            task_id="empty-final",
+            kind="one_click_pipeline",
+            trade_date="20260804",
+            strategy="hermes",
+            now="2026-08-04T15:31:00+08:00",
+            force=True,
+        )
+        assert claimed is True
+        store.mark_task_running("empty-final", "2026-08-04T15:32:00+08:00")
+        store.create_experiment_run(_run_row("empty-final"))
+
+        store.record_experiment(
+            _run_row("empty-final"),
+            _decisions("empty-final"),
+            task_completion=_task_completion("empty-final"),
+            scan_completion=_scan_completion("empty-final", selected=False),
+        )
+
+        assert store.con.execute("SELECT COUNT(*) FROM picks").fetchone()[0] == 0
+        assert store.latest_scan_run().iloc[0]["run_id"] == "empty-final"
+
+
 def test_create_and_fail_run_enforce_status_transitions(tmp_path):
     with Store(tmp_path / "status.duckdb") as store:
         with pytest.raises(ValueError, match="queued|running"):
@@ -367,7 +494,6 @@ def test_succeeded_run_cannot_be_marked_failed(tmp_path):
         {"data_cutoff_at": None},
         {"strategy_name": "  "},
         {"strategy_version": None},
-        {"model": ""},
         {"prompt_version": ""},
         {"candidate_hash": ""},
         {"candidate_count": 0},
@@ -405,32 +531,6 @@ def test_existing_run_rejects_mismatched_audit_metadata(tmp_path, field, changed
         assert store.experiment_decisions("audit-mismatch").empty
 
 
-def test_update_decision_uses_strict_field_whitelist(tmp_path):
-    with Store(tmp_path / "update.duckdb") as store:
-        store.record_experiment(_run_row("update"), _decisions("update"))
-        store.update_experiment_decision(
-            "update",
-            "rule",
-            "000001.SZ",
-            entry_date="20260805",
-            entry_price=10.0,
-            entry_status="filled",
-            ret1_target_date="20260805",
-            ret1_status="succeeded",
-            ret1=0.02,
-        )
-        saved = store.experiment_decisions("update")
-        rule = saved[saved["group_name"] == "rule"].iloc[0]
-        assert rule["entry_price"] == pytest.approx(10.0)
-        assert rule["ret1"] == pytest.approx(0.02)
-
-        with pytest.raises(ValueError, match="非法实验明细字段"):
-            store.update_experiment_decision(
-                "update", "rule", "000001.SZ", **{"status = 'hacked'": "x"}
-            )
-        assert store.experiment_run("update")["status"] == "succeeded"
-
-
 def test_json_and_null_values_are_preserved_without_defaults(tmp_path):
     rows = _decisions("nulls")
     rows.loc[rows["group_name"] == "rule", "reason_json"] = None
@@ -443,8 +543,6 @@ def test_json_and_null_values_are_preserved_without_defaults(tmp_path):
         ai = saved[saved["group_name"] == "ai"].iloc[0]
         assert pd.isna(rule["reason_json"])
         assert pd.isna(ai["risk_json"])
-        assert pd.isna(rule["entry_price"])
-        assert pd.isna(rule["ret10"])
 
 
 def test_missing_optional_values_are_stored_as_null(tmp_path):
@@ -455,73 +553,190 @@ def test_missing_optional_values_are_stored_as_null(tmp_path):
 
         assert saved["reason_json"].isna().all()
         assert saved["risk_json"].isna().all()
-        assert saved["entry_price"].isna().all()
-        assert saved["ret10"].isna().all()
 
 
-def test_pending_decisions_returns_rows_awaiting_entry_or_returns(tmp_path):
-    with Store(tmp_path / "pending.duckdb") as store:
-        store.record_experiment(_run_row("pending"), _decisions("pending"))
-        pending = store.pending_experiment_decisions()
-        assert len(pending) == 4
-        assert set(pending["run_id"]) == {"pending"}
+def _returns_row(
+    run_id: str,
+    group_name: str,
+    ts_code: str,
+    *,
+    horizon: str = "t1_close",
+    entry_price: float | None = None,
+    status: str = "pending_entry",
+) -> dict:
+    return {
+        "run_id": run_id,
+        "group_name": group_name,
+        "ts_code": ts_code,
+        "horizon": horizon,
+        "entry_date": "20260805",
+        "entry_price": entry_price,
+        "sell_date": None,
+        "sell_session": "close",
+        "sell_price": None,
+        "status": status,
+        "reason": None,
+        "gross_return": None,
+        "created_at": "2026-08-05T18:00:00+08:00",
+        "updated_at": "2026-08-05T18:00:00+08:00",
+    }
 
-        for group_name, ts_code in pending[["group_name", "ts_code"]].itertuples(
-            index=False, name=None
-        ):
-            store.update_experiment_decision(
-                "pending",
-                group_name,
-                ts_code,
-                entry_status="filled",
-                ret1_status="succeeded",
-                ret3_status="succeeded",
-                ret5_status="succeeded",
-                ret10_status="succeeded",
-            )
 
-        assert store.pending_experiment_decisions().empty
+def test_entries_awaiting_limits_only_lists_unsettled_succeeded_decisions(tmp_path):
+    with Store(tmp_path / "awaiting.duckdb") as store:
+        store.record_experiment(_run_row("done"), _decisions("done"))
+        # 未成功的批次不参与补数据：状态还在 running，明细模拟中断现场手工写入。
+        store.create_experiment_run(_run_row("running-run"))
+        store.con.execute(
+            "INSERT INTO experiment_decisions (run_id, group_name, ts_code, rank) "
+            "VALUES ('running-run', 'rule', '000009.SZ', 1)"
+        )
+        store.upsert_experiment_returns(
+            [
+                # 买到了：entry_price 有值即为终局。
+                _returns_row("done", "rule", "000001.SZ", entry_price=10.0, status="filled"),
+                # 买不到：封板或买入日没有 K 线，同样是终局。
+                _returns_row("done", "ai", "000002.SZ", status="entry_unavailable"),
+                _returns_row("done", "hybrid", "000003.SZ", status="entry_bar_missing"),
+                # 还没定：只有 pending_entry，需要继续补涨跌停价。
+                _returns_row("done", "benchmark", "000004.SZ", status="pending_entry"),
+            ]
+        )
+
+        awaiting = store.experiment_entries_awaiting_limits()
+
+        assert list(awaiting.columns) == ["run_id", "as_of", "group_name", "ts_code"]
+        assert awaiting.to_dict("records") == [
+            {
+                "run_id": "done",
+                "as_of": "20260804",
+                "group_name": "benchmark",
+                "ts_code": "000004.SZ",
+            }
+        ]
 
 
-def test_pending_decisions_uses_one_retryable_status_contract(tmp_path):
-    with Store(tmp_path / "pending-statuses.duckdb") as store:
-        store.record_experiment(_run_row("statuses"), _decisions("statuses"))
-        updates = {
-            "rule": {
-                "entry_status": "filled",
-                "ret1_status": "calendar_missing",
-                "ret3_status": None,
-                "ret5_status": "filled",
-                "ret10_status": "filled",
-            },
-            "ai": {
-                "entry_status": "filled",
-                "ret1_status": "target_bar_missing",
-                "ret3_status": "filled",
-                "ret5_status": "filled",
-                "ret10_status": "filled",
-            },
-            "hybrid": {
-                "entry_status": "filled",
-                "ret1_status": "filled",
-                "ret3_status": "filled",
-                "ret5_status": "filled",
-                "ret10_status": "filled",
-            },
-            "benchmark": {
-                "entry_status": "entry_unavailable",
-                "ret1_status": "future_not_reached",
-                "ret3_status": "calendar_missing",
-                "ret5_status": "target_bar_missing",
-                "ret10_status": None,
-            },
+def test_experiment_returns_filter_by_as_of_and_entry_status(tmp_path):
+    with Store(tmp_path / "returns-filters.duckdb") as store:
+        store.record_experiment(_run_row("early"), _decisions("early"))
+        store.record_experiment(
+            _run_row("late", as_of="20260805"), _decisions("late")
+        )
+        store.upsert_experiment_returns(
+            [
+                _returns_row("early", "rule", "000001.SZ", entry_price=10.0, status="filled"),
+                _returns_row("early", "ai", "000002.SZ", status="entry_unavailable"),
+                _returns_row("early", "hybrid", "000003.SZ", status="pending_entry"),
+                _returns_row("late", "rule", "000001.SZ", entry_price=11.0, status="filled"),
+            ]
+        )
+
+        assert {row["group_name"] for row in store.experiment_returns(as_of="20260804")} == {
+            "rule",
+            "ai",
+            "hybrid",
         }
-        decisions = store.experiment_decisions("statuses")
-        for _, row in decisions.iterrows():
-            store.update_experiment_decision(
-                "statuses", row["group_name"], row["ts_code"], **updates[row["group_name"]]
-            )
+        assert [row["run_id"] for row in store.experiment_returns(as_of="20260805")] == [
+            "late"
+        ]
 
-        pending = store.pending_experiment_decisions()
+        by_status = {
+            entry_status: {
+                (row["run_id"], row["group_name"])
+                for row in store.experiment_returns(entry_status=entry_status)
+            }
+            for entry_status in ENTRY_STATUSES
+        }
+        assert by_status == {
+            "filled": {("early", "rule"), ("late", "rule")},
+            "entry_unavailable": {("early", "ai")},
+            "pending_entry": {("early", "hybrid")},
+        }
+        assert store.experiment_returns(as_of="20260805", entry_status="pending_entry") == []
 
-    assert set(pending["group_name"]) == {"rule", "ai"}
+
+def test_entry_status_classification_and_predicate_share_one_contract():
+    # 没算过收益和「算过但买不到」是两回事，不能合并成同一个状态。
+    assert classify_entry_status([]) is None
+    assert classify_entry_status([{"entry_price": 10.0, "status": "filled"}]) == "filled"
+    assert (
+        classify_entry_status([{"entry_price": None, "status": "entry_unavailable"}])
+        == "entry_unavailable"
+    )
+    assert (
+        classify_entry_status(
+            [
+                {"entry_price": None, "status": "pending_entry"},
+                {"entry_price": None, "status": "entry_bar_missing"},
+            ]
+        )
+        == "entry_unavailable"
+    )
+    assert (
+        classify_entry_status([{"entry_price": None, "status": "pending_entry"}])
+        == "pending_entry"
+    )
+
+    with pytest.raises(ValueError, match="非法成交状态"):
+        entry_status_predicate("不存在的状态", alias="e")
+
+
+_LEGACY_DECISIONS_DDL = """
+CREATE TABLE experiment_decisions (
+    run_id             VARCHAR,
+    group_name         VARCHAR,
+    ts_code            VARCHAR,
+    name               VARCHAR,
+    industry           VARCHAR,
+    rank               INTEGER,
+    rule_score         DOUBLE,
+    ai_score           DOUBLE,
+    hybrid_score       DOUBLE,
+    reason_json        VARCHAR,
+    risk_json          VARCHAR,
+    entry_date         VARCHAR,
+    entry_price        DOUBLE,
+    entry_status       VARCHAR,
+    entry_reason       VARCHAR,
+    ret1               DOUBLE,
+    ret1_target_date   VARCHAR,
+    ret1_status        VARCHAR,
+    ret1_reason        VARCHAR,
+    PRIMARY KEY (run_id, group_name, ts_code)
+)
+"""
+
+
+def test_opening_old_database_drops_legacy_decision_columns(tmp_path):
+    path = tmp_path / "legacy.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(_LEGACY_DECISIONS_DDL)
+    con.execute(
+        "INSERT INTO experiment_decisions VALUES "
+        "('legacy', 'rule', '000001.SZ', '样本', '测试行业', 1, 88.0, NULL, NULL, "
+        "NULL, NULL, '20260805', 10.0, 'filled', NULL, 0.02, '20260805', "
+        "'succeeded', NULL)"
+    )
+    con.close()
+
+    with Store(path) as store:
+        columns = _columns(store, "experiment_decisions")
+        assert columns == DECISION_COLUMNS
+        assert columns.isdisjoint(_LEGACY_DECISION_COLUMNS)
+
+        saved = store.experiment_decisions("legacy")
+        assert len(saved) == 1
+        row = saved.iloc[0]
+        assert (row["run_id"], row["group_name"], row["ts_code"]) == (
+            "legacy",
+            "rule",
+            "000001.SZ",
+        )
+        assert row["name"] == "样本"
+        assert int(row["rank"]) == 1
+        assert row["rule_score"] == pytest.approx(88.0)
+
+    # 第二次开库已经没有旧列可删，迁移必须幂等。
+    with Store(path) as store:
+        assert _columns(store, "experiment_decisions") == DECISION_COLUMNS
+        assert len(store.experiment_decisions("legacy")) == 1
