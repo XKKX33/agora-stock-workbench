@@ -20,6 +20,15 @@ def get_news_collect_manager(request: Request):
 def get_scheduler(request: Request):
     return request.app.state.scheduler
 
+
+def get_experiment_service(request: Request):
+    return request.app.state.experiment_service
+
+
 def get_agent_judge_manager(request: Request):
     return request.app.state.agent_judge_manager
 
+
+
+def get_returns_service(request: Request):
+    return request.app.state.returns_service

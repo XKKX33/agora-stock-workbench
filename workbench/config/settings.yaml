@@ -6,12 +6,16 @@ data:
   parquet_dir: data/parquet            # 冷存
   history_years: 5                     # 回补年限
   min_daily_rows: 1000                 # 最新交易日确认阈值(rows>此值视为已收盘确认)
+  # 隐藏最近 N 个交易日,杜绝前视偏差。选股/Agent/实验/收益一律只能看到
+  # "最新已确认交易日往前退 N 个开市日"及更早的数据;请求更新的日期直接拒绝。
+  # 0 = 关闭隐藏(等于旧行为)。K 线与行情查询不受影响,仍可看最新。
+  visibility_delay_sessions: 20
 
 tushare:
   # token 优先读环境变量 TUSHARE_TOKEN;为空则回退 ts.pro_api() 落盘 token
   token_env: TUSHARE_TOKEN
   request_timeout_seconds: 120
-  retry: 3
+  retry: 5
   sleep: 0.02
 
 realtime:
@@ -33,30 +37,32 @@ schedule:
   tick_seconds: 60                     # 调度轮询间隔(秒)
 
 ai:
-  # AI 盘后复盘叙述。凭据只从环境变量读,不写进本文件。
+  # AI 盘后复盘叙述。凭据只从环境变量读，不写进本文件。
   enabled: true
   provider: openai_compatible
   base_url: https://api.pie-xian.com/v1
   api_key_env: WORKBENCH_AI_API_KEY
-  model: deepseekv4flash
+  model: minimax-m3                       # 可在设置页或 settings.local.yaml 编辑
 
 agent:
-  # 多 agent 短线研判。接入方式与 ai 段一致(provider/base_url/model/api_key_env),
-  # 也允许单独覆盖;留空字段回退到 ai 段。
+  # 多 agent 短线研判；endpoint 固定为指定 OpenAI-compatible provider。
+  # 密钥只从 WORKBENCH_AI_API_KEY 环境变量读取，禁止写入 YAML。
   enabled: true
-  provider: openai_compatible        # 目前唯一实现:OpenAI 兼容 /chat/completions
-  model:                             # 留空回退 ai.model
-  base_url:                          # 留空回退 ai.base_url(必填,不猜默认地址)
-  api_key_env: WORKBENCH_AI_API_KEY  # 留空回退 ai.api_key_env
-  temperature: 0.2                   # 研判偏好稳定输出,温度低
-  max_tokens: 4000                   # 单次回答上限
-  # 面板默认参数与硬上限:前端可改,后端按上限钳制,防止超长任务打爆模型
-  default_candidates: 200            # 粗筛候选数量(1~200)
-  default_depth: 8                   # 深度学习数量(1~30)
-  default_final: 3                   # 最终输出数量(1~10)
-  max_candidates: 200
-  max_depth: 30
-  max_final: 10
+  provider: openai_compatible
+  model:                                      # 保持可编辑；空值按配置合并规则读取
+  base_url: https://api.pie-xian.com/v1
+  api_key_env: WORKBENCH_AI_API_KEY
+  temperature: 0.2
+  # grok-4.5 的长上下文粗筛需在上游约 60 秒响应头期限内完成。
+  reasoning_effort: low
+  max_tokens: 1200
+  # 面板默认参数与硬上限:前端可改,后端按上限钳制
+  default_candidates: 20
+  default_depth: 20
+  default_final: 3
+  max_candidates: 20
+  max_depth: 20
+  max_final: 3
 
 news:
   # 舆情采集。enabled=false 或 sources 为空时,盘后链条的采集步会明确报

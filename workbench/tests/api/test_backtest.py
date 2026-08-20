@@ -168,3 +168,34 @@ def test_out_of_range_top_k_is_rejected_by_validation(client):
     assert client.get("/api/backtest?top_k=0").status_code == 422
     assert client.get("/api/backtest?top_k=999").status_code == 422
     assert client.get("/api/backtest?cost_bps=-1").status_code == 422
+def test_backtest_api_accepts_audit_inputs_and_returns_them(client, db_path):
+    _seed_picks(db_path, _days(10), strategy=STRATEGY)
+    response = client.get(
+        "/api/backtest",
+        params={
+            "strategy": STRATEGY,
+            "signal_start": "20260101",
+            "signal_end": "20260110",
+            "visible_cutoff": "20260110",
+            "buy_cost_bps": 10,
+            "sell_cost_bps": 20,
+            "rebalance_mode": "non_overlap",
+            "limit_up_fill_policy": "skip",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["signal_date_range"] == {"start": "20260101", "end": "20260110"}
+    assert payload["visible_cutoff"] == "20260110"
+    assert payload["assumptions"]["buy_cost_bps"] == 10.0
+    assert payload["assumptions"]["sell_cost_bps"] == 20.0
+    assert payload["assumptions"]["rebalance_mode"] == "non_overlap"
+
+
+def test_legacy_cost_bps_is_explicit_double_sided_assumption(client, db_path):
+    _seed_picks(db_path, _days(15), strategy=STRATEGY)
+    payload = client.get(f"/api/backtest?strategy={STRATEGY}&cost_bps=30").json()
+    assert payload["assumptions"]["legacy_cost_bps"] == 30.0
+    assert payload["assumptions"]["cost_conversion"] == "equal_buy_sell"
+    assert payload["assumptions"]["buy_cost_bps"] == 15.0
+    assert payload["assumptions"]["sell_cost_bps"] == 15.0

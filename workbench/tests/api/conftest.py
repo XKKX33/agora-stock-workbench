@@ -81,11 +81,16 @@ def model_dir(tmp_path: Path, monkeypatch) -> Path:
 
 @pytest.fixture(autouse=True)
 def offline_settings(monkeypatch):
-    """API 测试必须离线:统一把舆情采集关掉,不依赖仓库默认配置。
+    """API 测试必须离线:统一把舆情采集关掉、AI 凭据清掉,不依赖仓库默认配置。
 
     仓库默认 settings.yaml 已开启 news.enabled=true(一键采集是产品功能),
     测试不能假设默认是关的——否则手动触发盘后链时会真的去抓全网热榜。
     这里显式隔离:其余配置保持真实值,只把 news 段改成"未启用、无来源"。
+
+    凭据同理。ai / agent 两段都从 `api_key_env` 指定的环境变量读密钥,开发机
+    上一旦导出过这个变量,"没配凭据要报 unconfigured"的用例就会翻红,更糟的
+    是 AI 复盘用例会真的去打模型接口。所以按配置里声明的变量名逐个删掉——
+    需要配好凭据的用例自己 setenv,夹具先跑,不会被覆盖。
     """
     isolated = copy.deepcopy(engine_config.load_settings())
     news = isolated.setdefault("news", {})
@@ -94,6 +99,11 @@ def offline_settings(monkeypatch):
     # 同时隔离"本地覆盖 settings.local.yaml",避免开发机上的 UI 设置污染测试
     monkeypatch.setattr(engine_config, "load_settings", lambda: isolated)
     monkeypatch.setattr(engine_config, "load_settings_with_local", lambda: isolated)
+    for section in ("ai", "agent"):
+        env_name = str(
+            (isolated.get(section) or {}).get("api_key_env") or ""
+        ).strip() or "WORKBENCH_AI_API_KEY"
+        monkeypatch.delenv(env_name, raising=False)
     for module in (
         close_pipeline_mod,
         run_scan_mod,

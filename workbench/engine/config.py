@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import yaml
+from dotenv import load_dotenv
 
 # workbench 根目录 = 本文件上两级 (engine/config.py -> engine -> workbench)
 WORKBENCH_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,11 @@ _MONEY_ALIASES = {
     "资金同步分歧_降级": "资金同步分歧，降级",
     "资金同步分歧,降级": "资金同步分歧，降级",
 }
+
+
+def load_workspace_env() -> None:
+    """加载工作台根目录的 .env，且不覆盖显式进程环境变量。"""
+    load_dotenv(WORKBENCH_ROOT / ".env", override=False)
 
 
 def _read_yaml(path: Path) -> Dict[str, Any]:

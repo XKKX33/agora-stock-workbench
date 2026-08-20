@@ -20,13 +20,13 @@ LOCAL_FILE = CONFIG_DIR / "settings.local.yaml"
 
 _AGENT_KEYS = {
     "enabled", "provider", "model", "base_url", "api_key_env",
-    "temperature", "max_tokens",
+    "temperature", "max_tokens", "reasoning_effort",
     "default_candidates", "default_depth", "default_final",
     "max_candidates", "max_depth", "max_final",
 }
 _AI_KEYS = {
     "enabled", "provider", "model", "base_url", "api_key_env",
-    "temperature", "max_tokens",
+    "temperature", "max_tokens", "reasoning_effort",
 }
 _NEWS_KEYS = {"enabled", "half_life_days", "close_cutoff"}
 
@@ -63,6 +63,10 @@ def save_local(patch: dict) -> dict:
         if not isinstance(raw, dict):
             continue
         clean = {k: v for k, v in raw.items() if k in keys and v is not None}
+        if "api_key_env" in clean:
+            # Provider credentials are intentionally fixed to the single supported
+            # environment variable; never persist arbitrary secret-bearing names.
+            clean["api_key_env"] = "WORKBENCH_AI_API_KEY"
         if clean:
             keep[section] = clean
     LOCAL_FILE.parent.mkdir(parents=True, exist_ok=True)

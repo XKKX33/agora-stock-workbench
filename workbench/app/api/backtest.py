@@ -27,12 +27,23 @@ def backtest(
     horizon: str = "ret5",
     top_k: int = Query(default=5, ge=1, le=50),
     cost_bps: float | None = Query(default=None, ge=0, le=500),
+    buy_cost_bps: float | None = Query(default=None, ge=0, le=500),
+    sell_cost_bps: float | None = Query(default=None, ge=0, le=500),
+    strategy_config_hash: str | None = None,
+    signal_start: str | None = Query(default=None, pattern=r"^[0-9]{8}$"),
+    signal_end: str | None = Query(default=None, pattern=r"^[0-9]{8}$"),
+    visible_cutoff: str | None = Query(default=None, pattern=r"^[0-9]{8}$"),
+    rebalance_mode: str = Query(default="non_overlap"),
+    limit_up_fill_policy: str = Query(default="skip"),
 ) -> dict:
     _check_horizon(horizon)
     return BacktestService(request.app.state.repository).run(
-        strategy=strategy, horizon=horizon, top_k=top_k, cost_bps=cost_bps
+        strategy=strategy, horizon=horizon, top_k=top_k, cost_bps=cost_bps,
+        buy_cost_bps=buy_cost_bps, sell_cost_bps=sell_cost_bps,
+        strategy_config_hash=strategy_config_hash, signal_start=signal_start,
+        signal_end=signal_end, visible_cutoff=visible_cutoff,
+        rebalance_mode=rebalance_mode, limit_up_fill_policy=limit_up_fill_policy,
     )
-
 
 @router.get("/backtest/compare")
 def backtest_compare(
@@ -40,8 +51,11 @@ def backtest_compare(
     horizon: str = "ret5",
     top_k: int = Query(default=5, ge=1, le=50),
     cost_bps: float | None = Query(default=None, ge=0, le=500),
+    buy_cost_bps: float | None = Query(default=None, ge=0, le=500),
+    sell_cost_bps: float | None = Query(default=None, ge=0, le=500),
 ) -> dict:
     _check_horizon(horizon)
     return BacktestService(request.app.state.repository).compare(
-        horizon=horizon, top_k=top_k, cost_bps=cost_bps
+        horizon=horizon, top_k=top_k, cost_bps=cost_bps,
+        buy_cost_bps=buy_cost_bps, sell_cost_bps=sell_cost_bps,
     )

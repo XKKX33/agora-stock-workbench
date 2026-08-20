@@ -377,3 +377,67 @@ def test_horizons_are_ordered_by_holding_days_not_by_name():
     这个列表是接口负载的一部分,前端照着渲染下拉框就是错序。
     """
     assert BT.horizons() == ["ret1", "ret3", "ret5", "ret10"]
+def test_backtest_audit_contract_and_split_costs():
+    days = _days(10)
+    frame = _picks(days, horizon="ret5")
+    frame.loc[frame["as_of"] == days[5], "entry_status"] = "entry_unavailable"
+    result = BT.run_backtest(
+        frame,
+        horizon="ret5",
+        strategy="s1",
+        strategy_config_hash="cfg123",
+        signal_start=days[0],
+        signal_end=days[-1],
+        visible_cutoff=days[-1],
+        buy_cost_bps=10.0,
+        sell_cost_bps=20.0,
+        rebalance_mode="non_overlap",
+        limit_up_fill_policy="skip",
+    )
+    payload = result.as_dict()
+
+    assert payload["strategy_config_hash"] == "cfg123"
+    assert payload["signal_date_range"] == {"start": days[0], "end": days[-1]}
+    assert payload["visible_cutoff"] == days[-1]
+    assert payload["planned_periods"] == 2
+    assert payload["measured_periods"] == 1
+    assert payload["skipped_periods"] == 1
+    assert payload["measurable_sample"] == 1
+    assert payload["coverage_ratio"] == 0.5
+    assert payload["assumptions"]["buy_cost_bps"] == 10.0
+    assert payload["assumptions"]["sell_cost_bps"] == 20.0
+    assert payload["assumptions"]["rebalance_mode"] == "non_overlap"
+    assert payload["assumptions"]["limit_up_fill_policy"] == "skip"
+    assert payload["skipped"][0]["reason"] == "entry_unavailable"
+
+
+def test_split_costs_charge_buy_and_sell_turnover_separately():
+    days = _days(10)
+    frame = _picks(days, codes=("A", "B"))
+    frame = frame[frame["as_of"] != days[5]]
+    frame = pd.concat([frame, _picks([days[5]], codes=("B", "C"))], ignore_index=True)
+    result = BT.run_backtest(
+        frame,
+        horizon="ret5",
+        buy_cost_bps=10.0,
+        sell_cost_bps=20.0,
+    )
+
+    assert result.periods[0].net_return == 0.009
+    assert result.periods[1].turnover == 0.5
+    assert result.periods[1].net_return == 0.0085
+
+
+def test_repeat_backtest_with_fixed_inputs_is_identical():
+    kwargs = {
+        "horizon": "ret5",
+        "strategy": "s1",
+        "strategy_config_hash": "cfg123",
+        "signal_start": "20260101",
+        "signal_end": "20260115",
+        "visible_cutoff": "20260115",
+        "buy_cost_bps": 10.0,
+        "sell_cost_bps": 20.0,
+    }
+    frame = _picks(_days(15))
+    assert BT.run_backtest(frame, **kwargs).as_dict() == BT.run_backtest(frame, **kwargs).as_dict()

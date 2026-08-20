@@ -26,6 +26,7 @@ class AgentSettingsIn(BaseModel):
     api_key_env: str | None = Field(default=None, max_length=200)
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=100, le=32000)
+    reasoning_effort: str | None = Field(default=None, pattern="^(low|medium|high)$")
     default_candidates: int | None = Field(default=None, ge=1, le=500)
     default_depth: int | None = Field(default=None, ge=1, le=50)
     default_final: int | None = Field(default=None, ge=1, le=50)

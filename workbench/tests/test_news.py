@@ -645,3 +645,16 @@ def test_no_fetchers_at_all_is_empty_not_error(store: Store):
     assert result.stored == 0
     assert result.sources == []
     assert result.as_dict()["trade_date"] == TRADE_DATE
+
+
+def test_unregistered_source_item_aborts_batch_without_partial_news(store: Store):
+    """采集器返回未登记 source_id 时整批失败,不得写入任何条目。"""
+    fetcher = FakeFetcher(
+        _source("demo"),
+        [_item(source_id="not-registered")],
+    )
+
+    with pytest.raises(NewsCollectError, match="未登记|未注册|source_id"):
+        collect_news(store=store, trade_date=TRADE_DATE, fetchers=[fetcher])
+
+    assert store.con.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 0

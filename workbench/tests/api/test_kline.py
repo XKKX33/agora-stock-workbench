@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.test_run_scan_offline import AS_OF, _TRADE_DATES
+
 
 def _codes(items: list[dict]) -> list[str]:
     return [item["ts_code"] for item in items]
@@ -17,7 +19,7 @@ def test_search_finds_seeded_stock(client):
     assert first["symbol"] == "600001"
     assert first["name"] == "强主升A"
     assert first["industry"] == "半导体"
-    assert first["last_date"] == "20250812"
+    assert first["last_date"] == AS_OF
     assert first["close"] is not None
     assert first["pct_chg"] is not None
 
@@ -71,11 +73,11 @@ def test_kline_detail_shape_and_ascending_bars(client):
         }
 
     bars = payload["bars"]
-    assert len(bars) == 160  # 种子库只有 160 根日线
+    assert len(bars) == len(_TRADE_DATES)
     dates = [bar["trade_date"] for bar in bars]
     assert dates == sorted(dates)
-    assert dates[0] == "20250101"
-    assert dates[-1] == "20250812"
+    assert dates[0] == _TRADE_DATES[0]
+    assert dates[-1] == AS_OF
 
     indicator_keys = [
         "ma5", "ma10", "ma20", "ma60",

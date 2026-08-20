@@ -63,3 +63,11 @@ def test_settings_put_and_read(client):
     data = r2.json()
     assert data["agent"]["model"] == "deepseek-chat"
     assert data["agent"]["default_candidates"] == 120
+
+
+def test_settings_never_persist_custom_api_key_environment(client):
+    response = client.put("/api/settings", json={"agent": {"api_key_env": "SECRET_ENV_NAME"}})
+    assert response.status_code == 200
+    saved = response.json()["saved"]["agent"]
+    assert saved["api_key_env"] == "WORKBENCH_AI_API_KEY"
+    assert "SECRET_ENV_NAME" not in str(response.json())

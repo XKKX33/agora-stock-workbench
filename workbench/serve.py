@@ -32,6 +32,10 @@ if str(WORKBENCH_ROOT) not in _py_path.split(os.pathsep):
         f"{WORKBENCH_ROOT}{os.pathsep}{_py_path}" if _py_path else str(WORKBENCH_ROOT)
     )
 
+from engine.config import load_workspace_env  # noqa: E402
+
+load_workspace_env()
+
 from app.config import AppSettings  # noqa: E402
 
 

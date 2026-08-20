@@ -11,6 +11,7 @@ pandas>=2.0           # 全项目数据结构
 numpy>=1.24           # 因子计算与指标
 tushare>=1.4.6        # engine/ingest_tushare.py 联网更新行情/日历/资金流
 pyyaml>=6             # engine/config.py + app/services/settings_store.py 读写配置
+python-dotenv>=1.0    # engine/config.py 从 Git 忽略的 .env 加载本地凭据
 
 # ── 接口与页面 ────────────────────────────────────────
 fastapi>=0.115        # app/ 接口层
@@ -36,5 +37,4 @@ scikit-learn>=1.3
 # easyquotation       实时行情源,从未 import;settings.realtime 段只有
 #                     limit_up_pct 被 engine/gates.py 当阈值读取
 # pyarrow             settings.data.parquet_dir 冷存尚未实现,无 to/read_parquet 调用
-# python-dotenv       凭据直接走 os.environ,不读 .env 文件
 # torch               阶段四深度学习,未开始

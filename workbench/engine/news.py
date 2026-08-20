@@ -195,6 +195,14 @@ def collect_news(
         result.sources.append(source_id)
         raws.extend(batch)
     result.fetched = len(raws)
+    registered_source_ids = {f.source.source_id for f in enabled}
+    unknown_source_ids = sorted(
+        {raw.source_id for raw in raws} - registered_source_ids
+    )
+    if unknown_source_ids:
+        raise NewsCollectError(
+            f"采集结果包含未登记 source_id: {', '.join(unknown_source_ids)}"
+        )
     if not raws:
         return result
 

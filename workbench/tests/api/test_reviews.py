@@ -13,7 +13,11 @@ from __future__ import annotations
 import pytest
 
 from engine.db import Store
-from tests.test_run_scan_offline import AS_OF
+from tests.test_run_scan_offline import AS_OF, _TRADE_DATES
+
+# 固定装置的 160 个日历日全部开市:基准日 = AS_OF,可见日 = 基准日往前退 20 个
+# 开市日。复盘默认日期就是可见日,AS_OF 本身落在隐藏窗口内会被拒。
+VISIBLE_AS_OF = _TRADE_DATES[-21]
 
 pytestmark = pytest.mark.api
 
@@ -35,10 +39,27 @@ def test_review_returns_labeled_sections(client):
             assert section["detail"]
 
 
-def test_review_accepts_explicit_trade_date(client):
-    payload = client.get("/api/reviews", params={"trade_date": AS_OF}).json()
+def test_review_defaults_to_the_visible_session(client):
+    """默认日期取可见日,不是行情最新交易日。"""
+    payload = client.get("/api/reviews").json()
 
-    assert payload["trade_date"] == AS_OF
+    assert payload["trade_date"] == VISIBLE_AS_OF
+
+
+def test_review_accepts_explicit_trade_date(client):
+    payload = client.get("/api/reviews", params={"trade_date": VISIBLE_AS_OF}).json()
+
+    assert payload["trade_date"] == VISIBLE_AS_OF
+
+
+def test_review_rejects_trade_date_inside_the_hidden_window(client):
+    """显式指定隐藏窗口内的日期直接 400,不静默改写成可见日。"""
+    response = client.get("/api/reviews", params={"trade_date": AS_OF})
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "lookahead_blocked"
+    assert error["details"]["visible_as_of"] == VISIBLE_AS_OF
 
 
 def test_review_get_does_not_write(client, db_path):

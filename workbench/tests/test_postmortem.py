@@ -450,6 +450,48 @@ def test_run_postmortem_json():
             _check("backfill total_filled > 0", summary["backfill"]["total_filled"] > 0)
 
 
+def test_backfill_skips_hidden_window():
+    """目标日落在隐藏窗口里:不回填、记 future_not_visible、不算缺数据。
+
+    库里 20 日行情齐全,只把可见上限压在第 6 日(idx5)。as_of=第 5 日的 ret1
+    目标日正好是第 6 日(可见,照常回填),ret3/ret5/ret10 的目标日更晚——
+    行情就在库里也不许读,这正是隐藏窗口要防的事。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        with Store(os.path.join(tmp, "t.duckdb")) as store:
+            _seed(
+                store,
+                as_of_idx=4,
+                price_paths={"A.SH": [10.0 + i for i in range(20)]},
+            )
+            _seed_picks(store, _DATES[4], [{"ts_code": "A.SH", "rank": 1, "total": 0.9}])
+
+            report = backfill_returns(store, exchange="SSE", visible_max=_DATES[5])
+            picks = store.all_picks("test").set_index("ts_code")
+
+            _check("可见日内的 ret1 照常回填", not pd.isna(picks.loc["A.SH", "ret1"]))
+            _check("ret1 回填计 1 条", report.filled["ret1"] == 1)
+            for col in ("ret3", "ret5", "ret10"):
+                _check(f"{col} 目标日不可见 -> 保持 NULL", pd.isna(picks.loc["A.SH", col]))
+                _check(
+                    f"{col} 记 future_not_visible",
+                    report.pending_reasons[col].get("future_not_visible", 0) == 1,
+                )
+            _check(
+                "隐藏窗口不进 needs_attention",
+                sum(report.needs_attention().values()) == 0,
+            )
+
+            # 对照:同一批数据不设上限就能填上,证明上面是闸门拦的、不是缺数据
+            report2 = backfill_returns(store, exchange="SSE")
+            picks2 = store.all_picks("test").set_index("ts_code")
+            _check("不设上限时 ret5 能填", not pd.isna(picks2.loc["A.SH", "ret5"]))
+            _check(
+                "对照组不再有 future_not_visible",
+                report2.pending_reasons["ret5"].get("future_not_visible", 0) == 0,
+            )
+
+
 _TESTS = (
     test_backfill_correctness,
     test_lookahead_pending,
@@ -461,6 +503,7 @@ _TESTS = (
     test_picks_old_pk_migrates_to_business_key,
     test_evaluate_metrics,
     test_run_postmortem_json,
+    test_backfill_skips_hidden_window,
 )
 
 

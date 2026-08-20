@@ -148,15 +148,17 @@ def _profit_factor(returns: Sequence[float]) -> Optional[float]:
 
 @dataclass(frozen=True)
 class Period:
-    """一次调仓的结果。gross 是毛收益,net 扣掉换手成本。"""
+    """一次调仓的结果。gross 是毛收益,net 扣掉买卖成本。"""
 
     as_of: str
     codes: Tuple[str, ...]
     gross_return: float
     net_return: float
-    turnover: float          # 相对上一期持仓的换手率;首期建仓记 1.0
-    gross_equity: float      # 该期结束后的累计净值(不计成本)
-    equity: float            # 该期结束后的累计净值(计成本)
+    turnover: float
+    gross_equity: float
+    equity: float
+    buy_turnover: float = 0.0
+    sell_turnover: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -166,6 +168,8 @@ class Period:
             "gross_return": round(self.gross_return, 6),
             "net_return": round(self.net_return, 6),
             "turnover": round(self.turnover, 4),
+            "buy_turnover": round(self.buy_turnover, 4),
+            "sell_turnover": round(self.sell_turnover, 4),
             "gross_equity": round(self.gross_equity, 6),
             "equity": round(self.equity, 6),
         }
@@ -173,15 +177,13 @@ class Period:
 
 @dataclass(frozen=True)
 class SkippedPeriod:
-    """被跳过的调仓期。reason 说清是缺数据还是那天根本没选股。"""
+    """被跳过的调仓期。reason 说清是缺数据、不可成交还是当天无选股。"""
 
     as_of: str
     reason: str
     n_missing: int = 0
-
     def as_dict(self) -> dict:
         return {"as_of": self.as_of, "reason": self.reason, "n_missing": self.n_missing}
-
 
 @dataclass
 class BacktestResult:
@@ -189,10 +191,20 @@ class BacktestResult:
     horizon: str
     top_k: int
     cost_bps: float
+    strategy_config_hash: Optional[str] = None
+    signal_start: Optional[str] = None
+    signal_end: Optional[str] = None
+    visible_cutoff: Optional[str] = None
+    buy_cost_bps: float = 0.0
+    sell_cost_bps: float = 0.0
+    rebalance_mode: str = "non_overlap"
+    limit_up_fill_policy: str = "skip"
+    legacy_cost_bps: Optional[float] = None
+    cost_conversion: Optional[str] = None
     periods: List[Period] = field(default_factory=list)
     skipped: List[SkippedPeriod] = field(default_factory=list)
-    available_days: int = 0        # 台账里有选股的截面总数
-    scheduled_periods: int = 0     # 按 N 个截面一期排下来应有的期数
+    available_days: int = 0
+    scheduled_periods: int = 0
     missing_reason: Optional[str] = None
 
     @property
@@ -200,12 +212,19 @@ class BacktestResult:
         return bool(self.periods)
 
     @property
-    def equity_curve(self) -> List[float]:
-        """净值曲线。一期都没测出来时是**空**,不是 [1.0]。
+    def planned_periods(self) -> int:
+        return self.scheduled_periods
 
-        单给一个 1.0 的起点会让下游把"没测过"读成"测过、没波动":
-        回撤会算出 0.0(一路没跌),曲线会画出一个点。宁可空着。
-        """
+    @property
+    def measurable_sample(self) -> int:
+        return len(self.periods)
+
+    @property
+    def coverage_ratio(self) -> Optional[float]:
+        return (len(self.periods) / self.scheduled_periods) if self.scheduled_periods else None
+
+    @property
+    def equity_curve(self) -> List[float]:
         if not self.periods:
             return []
         return [1.0] + [p.equity for p in self.periods]
@@ -218,12 +237,6 @@ class BacktestResult:
 
     @property
     def has_interior_gap(self) -> bool:
-        """中间有洞时为 True。
-
-        末尾几期跳过是正常的(T+N 还没到),但中间跳过就意味着这条曲线是
-        "已测得期次的连乘",不是完整日历净值——连乘时那一期等于被当成了
-        0 收益。这个事实必须让页面能看见,不能只体现在跳过计数里。
-        """
         if not self.periods or not self.skipped:
             return False
         last = self.periods[-1].as_of
@@ -236,8 +249,6 @@ class BacktestResult:
         last = _parse_day(self.periods[-1].as_of)
         if first is None or last is None:
             return None
-        # 末期还要持有 N 个交易日才结清,按 5 个交易日≈7 个自然日折算补上,
-        # 否则分母偏小、年化偏大。这是近似,不是精确日历。
         tail = round(HORIZON_DAYS[self.horizon] * 7 / 5)
         return (last - first).days + tail
 
@@ -250,16 +261,6 @@ class BacktestResult:
         return final ** (365.25 / span_days) - 1.0
 
     def _sharpe(self, returns: List[float]) -> Optional[float]:
-        """按调仓频率年化的夏普。**无风险利率取 0**,所以这是偏高的口径。
-
-        分子是收益均值本身而不是超额收益(未减无风险利率),真实夏普比这个低。
-        没减是因为回测跨期可能横跨利率变动,取哪个基准都是又一个假设;
-        与其偷偷塞一个数字进去,不如把"取 0"写进 assumptions 让人看见。
-
-        年化乘 sqrt(244 / 持仓天数),前提是各期收益独立同分布——非重叠调仓
-        让"独立"这一半基本成立,"同分布"则未必。期数 < 4 直接不给值:
-        4 个点算出来的标准差没有统计意义,给了反而被当成结论。
-        """
         if len(returns) < MIN_PERIODS_FOR_SHARPE:
             return None
         series = pd.Series(returns, dtype="float64")
@@ -293,42 +294,43 @@ class BacktestResult:
         }
 
     def as_dict(self) -> dict:
-        labels = ["起点"] + [p.as_of for p in self.periods]
+        labels = (["起点"] + [p.as_of for p in self.periods]) if self.periods else []
         drawdown, peak, trough = max_drawdown(self.equity_curve)
         curve = [
-            {
-                "label": labels[i],
-                "equity": round(value, 6),
-                "gross_equity": round(self.gross_curve[i], 6),
-            }
+            {"label": labels[i], "equity": round(value, 6), "gross_equity": round(self.gross_curve[i], 6)}
             for i, value in enumerate(self.equity_curve)
         ]
+        assumptions = {
+            "mode": self.rebalance_mode,
+            "rebalance_mode": self.rebalance_mode,
+            "mode_note": f"每隔 {HORIZON_DAYS[self.horizon]} 个截面开一笔,上一笔结清后再开下一笔,不做重叠持仓",
+            "cost_bps": self.cost_bps,
+            "buy_cost_bps": self.buy_cost_bps,
+            "sell_cost_bps": self.sell_cost_bps,
+            "limit_up_fill_policy": self.limit_up_fill_policy,
+            "cost_note": "成本按买入和卖出端分别计价,换手率为 sum(abs(w_new-w_old))/2",
+            "weighting": "等权买入 rank 前 N 名",
+            "sharpe_note": f"夏普按无风险利率 = 0 算,假设各期独立同分布,调仓期数少于 {MIN_PERIODS_FOR_SHARPE} 期直接不给值",
+        }
+        if self.legacy_cost_bps is not None:
+            assumptions["legacy_cost_bps"] = self.legacy_cost_bps
+            assumptions["cost_conversion"] = self.cost_conversion or "equal_buy_sell"
         return {
             "strategy": self.strategy,
+            "strategy_config_hash": self.strategy_config_hash,
             "horizon": self.horizon,
             "top_k": self.top_k,
+            "signal_date_range": {"start": self.signal_start, "end": self.signal_end},
+            "visible_cutoff": self.visible_cutoff,
             "available": self.available,
             "missing_reason": self.missing_reason,
-            # 成本与调仓口径是"假设",按项目约定单列一段,不混进 metrics 当事实
-            "assumptions": {
-                "mode": "non_overlap",
-                "mode_note": (
-                    f"每隔 {HORIZON_DAYS[self.horizon]} 个截面开一笔,"
-                    "上一笔结清后再开下一笔,不做重叠持仓"
-                ),
-                "cost_bps": self.cost_bps,
-                "cost_note": (
-                    "换手率按等权权重变化算(sum|w_new - w_old| / 2),"
-                    "只对换手部分收双边成本;留仓部分只对权重变动的那一截计费。"
-                    "买卖不分开计价,印花税只在卖出端的不对称暂未建模"
-                ),
-                "weighting": "等权买入 rank 前 N 名",
-                "sharpe_note": (
-                    "夏普按无风险利率 = 0 算(分子是收益均值本身,不是超额收益),"
-                    "因此偏高;年化用 sqrt(244 / 持仓天数),假设各期收益独立同分布。"
-                    f"调仓期数少于 {MIN_PERIODS_FOR_SHARPE} 期直接不给值"
-                ),
-            },
+            "planned_periods": self.scheduled_periods,
+            "measured_periods": len(self.periods),
+            "skipped_periods": len(self.skipped),
+            "interior_gap": self.has_interior_gap,
+            "measurable_sample": self.measurable_sample,
+            "coverage_ratio": self.coverage_ratio,
+            "assumptions": assumptions,
             "coverage": {
                 "available_days": self.available_days,
                 "scheduled_periods": self.scheduled_periods,
@@ -339,14 +341,23 @@ class BacktestResult:
             "metrics": self.metrics(),
             "drawdown": {
                 "max": drawdown,
-                "peak_label": labels[peak] if peak is not None else None,
-                "trough_label": labels[trough] if trough is not None else None,
+                "peak_label": labels[peak] if peak is not None and labels else None,
+                "trough_label": labels[trough] if trough is not None and labels else None,
             },
             "equity_curve": curve,
             "periods": [p.as_dict() for p in self.periods],
             "skipped": [s.as_dict() for s in self.skipped],
         }
 
+def _trade_turnover(prev_codes: Optional[Sequence[str]], codes: Sequence[str]) -> Tuple[float, float, float]:
+    """Return (total, buy-side, sell-side) turnover from equal-weight deltas."""
+    if prev_codes is None:
+        return 1.0, 1.0, 0.0
+    previous = {str(code): 1.0 / len(prev_codes) for code in prev_codes}
+    current = {str(code): 1.0 / len(codes) for code in codes}
+    buy = sum(max(current.get(code, 0.0) - previous.get(code, 0.0), 0.0) for code in set(previous) | set(current))
+    sell = sum(max(previous.get(code, 0.0) - current.get(code, 0.0), 0.0) for code in set(previous) | set(current))
+    return (buy + sell) / 2.0, buy, sell
 
 def run_backtest(
     picks: Optional[pd.DataFrame],
@@ -354,22 +365,50 @@ def run_backtest(
     horizon: str = "ret5",
     strategy: Optional[str] = None,
     top_k: int = 5,
-    cost_bps: float = DEFAULT_COST_BPS,
+    cost_bps: Optional[float] = DEFAULT_COST_BPS,
+    buy_cost_bps: Optional[float] = None,
+    sell_cost_bps: Optional[float] = None,
+    strategy_config_hash: Optional[str] = None,
+    signal_start: Optional[str] = None,
+    signal_end: Optional[str] = None,
+    visible_cutoff: Optional[str] = None,
+    rebalance_mode: str = "non_overlap",
+    limit_up_fill_policy: str = "skip",
 ) -> BacktestResult:
-    """在 picks 台账上跑不重叠调仓回测。
-
-    只读 DataFrame,不碰数据库、不联网,因此可以拿合成数据完整测试。
-    """
+    """在 picks 台账上跑固定输入、非重叠调仓回测。"""
     if horizon not in HORIZON_DAYS:
         raise ValueError(f"未知期限: {horizon}(可选 {sorted(HORIZON_DAYS)})")
-    step = HORIZON_DAYS[horizon]
+    if rebalance_mode != "non_overlap":
+        raise ValueError("仅支持 non_overlap 调仓模式")
+    legacy_effective = False
+    if cost_bps is not None and (buy_cost_bps is None and sell_cost_bps is None):
+        legacy = float(cost_bps)
+        buy_cost_bps = sell_cost_bps = legacy / 2.0
+        legacy_effective = True
+        legacy_cost = legacy
+        conversion = "equal_buy_sell"
+    else:
+        legacy_cost = None
+        conversion = None
+        buy_cost_bps = 0.0 if buy_cost_bps is None else float(buy_cost_bps)
+        sell_cost_bps = 0.0 if sell_cost_bps is None else float(sell_cost_bps)
+        cost_bps = float(buy_cost_bps + sell_cost_bps)
     result = BacktestResult(
         strategy=strategy or "全部策略",
         horizon=horizon,
         top_k=int(top_k),
-        cost_bps=float(cost_bps),
+        cost_bps=float(cost_bps or 0.0),
+        strategy_config_hash=strategy_config_hash,
+        signal_start=signal_start,
+        signal_end=signal_end,
+        visible_cutoff=visible_cutoff,
+        buy_cost_bps=float(buy_cost_bps),
+        sell_cost_bps=float(sell_cost_bps),
+        rebalance_mode=rebalance_mode,
+        limit_up_fill_policy=limit_up_fill_policy,
+        legacy_cost_bps=legacy_cost,
+        cost_conversion=conversion,
     )
-
     frame = picks if picks is not None else pd.DataFrame()
     if not frame.empty and strategy and "strategy" in frame.columns:
         frame = frame[frame["strategy"].astype(str) == str(strategy)]
@@ -380,61 +419,57 @@ def run_backtest(
         if column not in frame.columns:
             result.missing_reason = f"column_missing:{column}"
             return result
-
+    as_of_key = frame["as_of"].astype(str)
+    if signal_start is not None:
+        frame = frame[as_of_key >= str(signal_start)]
+    if signal_end is not None:
+        frame = frame[as_of_key <= str(signal_end)]
+    if visible_cutoff is not None:
+        frame = frame[frame["as_of"].astype(str) <= str(visible_cutoff)]
     days = sorted({str(d) for d in frame["as_of"].dropna()})
     result.available_days = len(days)
     if not days:
         result.missing_reason = "no_picks"
         return result
+    step = HORIZON_DAYS[horizon]
     result.scheduled_periods = (len(days) + step - 1) // step
-
-    as_of_key = frame["as_of"].astype(str)
     prev_codes: Optional[Tuple[str, ...]] = None
     equity = 1.0
     gross_equity = 1.0
     index = 0
     while index < len(days):
         day = days[index]
-        # 调仓日程先推进:某一期算不出也不能提前开下一笔,否则持仓就重叠了
         index += step
-
-        basket = frame[as_of_key == day]
+        basket = frame[frame["as_of"].astype(str) == day]
         if "rank" in basket.columns:
             basket = basket.sort_values("rank")
         basket = basket.head(int(top_k))
         if basket.empty:
             result.skipped.append(SkippedPeriod(day, "no_picks_on_day"))
             continue
-
+        if limit_up_fill_policy == "skip" and "entry_status" in basket.columns:
+            status = basket["entry_status"].astype(str).str.lower()
+            unavailable = status.isin({"entry_unavailable", "limit_up_locked", "entry_bar_missing", "pending_entry", "future_not_visible", "future_not_reached"})
+            if unavailable.any():
+                result.skipped.append(SkippedPeriod(day, "entry_unavailable", int(unavailable.sum())))
+                continue
         returns = pd.to_numeric(basket[horizon], errors="coerce")
         n_missing = int(returns.isna().sum())
         if n_missing:
-            # 只要有一只没回填就整期跳过。用剩下的凑数等于偷偷换了组合口径,
-            # 而且换的方向通常有偏——没回填的往往是最近的、也是最该看的那几期。
-            result.skipped.append(
-                SkippedPeriod(day, "return_not_backfilled", n_missing)
-            )
+            result.skipped.append(SkippedPeriod(day, "return_not_backfilled", n_missing))
             continue
-
         codes = tuple(str(c) for c in basket["ts_code"])
         gross = float(returns.mean())
-        turnover = _turnover(prev_codes, codes)
-        net = gross - cost_bps / 10000.0 * turnover
+        turnover, buy_turnover, sell_turnover = _trade_turnover(prev_codes, codes)
+        if legacy_effective:
+            net = gross - float(cost_bps) / 10000.0 * turnover
+        else:
+            net = gross - (float(buy_cost_bps) / 10000.0 * buy_turnover) - (float(sell_cost_bps) / 10000.0 * sell_turnover)
+        net = round(net, 12)
         gross_equity *= 1.0 + gross
         equity *= 1.0 + net
-        result.periods.append(
-            Period(
-                as_of=day,
-                codes=codes,
-                gross_return=gross,
-                net_return=net,
-                turnover=turnover,
-                gross_equity=gross_equity,
-                equity=equity,
-            )
-        )
+        result.periods.append(Period(day, codes, gross, net, turnover, gross_equity, equity, buy_turnover, sell_turnover))
         prev_codes = codes
-
     if not result.periods:
         result.missing_reason = "no_measurable_period"
     return result
@@ -445,20 +480,17 @@ def compare_strategies(
     *,
     horizon: str = "ret5",
     top_k: int = 5,
-    cost_bps: float = DEFAULT_COST_BPS,
+    cost_bps: Optional[float] = DEFAULT_COST_BPS,
+    buy_cost_bps: Optional[float] = None,
+    sell_cost_bps: Optional[float] = None,
 ) -> List[BacktestResult]:
-    """逐策略跑一遍,供并排对比。没有 strategy 列时返回空表而不是硬凑一条。"""
+    """逐策略跑一遍,供并排对比。"""
     if picks is None or picks.empty or "strategy" not in picks.columns:
         return []
     names = sorted({str(s) for s in picks["strategy"].dropna()})
-    return [
-        run_backtest(
-            picks, horizon=horizon, strategy=name, top_k=top_k, cost_bps=cost_bps
-        )
-        for name in names
-    ]
-
-
+    return [run_backtest(picks, horizon=horizon, strategy=name, top_k=top_k,
+                         cost_bps=cost_bps, buy_cost_bps=buy_cost_bps,
+                         sell_cost_bps=sell_cost_bps) for name in names]
 def from_store(
     store,
     *,

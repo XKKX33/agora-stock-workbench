@@ -15,11 +15,13 @@ from app.api import (
     ai,
     analytics,
     backtest,
+    experiments,
     health,
     kline,
     news,
     overview,
     pipelines,
+    returns,
     reviews,
     scans,
     screener,
@@ -31,11 +33,15 @@ from app.config import AppSettings
 from app.errors import register_error_handlers
 from app.repositories.market import MarketRepository
 from app.services.agents import AgentJudgeManager
+from app.services.experiments import ExperimentService
 from app.services.news_collect import NewsCollectManager
 from app.services.pipelines import PipelineManager
+from app.services.returns import ReturnsService
 from app.services.scans import ScanManager
 from app.services.scheduler import CloseScheduler
 
+from app.services.pi_agent import PiAgentProcessSupervisor
+from engine.config import load_settings_with_local
 logger = logging.getLogger(__name__)
 
 
@@ -53,6 +59,7 @@ _PAGES = {
     "p10_watchlist.html",
     "p11_agents.html",
     "p12_settings.html",
+    "p13_agent_dashboard.html",
 }
 
 
@@ -82,13 +89,33 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     pipeline_manager = PipelineManager(app_settings.db_path)
     news_collect_manager = NewsCollectManager(app_settings.db_path)
     agent_judge_manager = AgentJudgeManager(app_settings.db_path)
+    experiment_service = ExperimentService(app_settings.db_path)
+    returns_service = ReturnsService(app_settings.db_path)
     scheduler = CloseScheduler(pipeline_manager)
-
+    pi_supervisor = PiAgentProcessSupervisor(app_settings.workbench_root / "pi_agent")
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         migrated = migrate_schema(app_settings.db_path)
-        # 表结构没迁移成功(库文件不存在)时不启动调度线程:此时连
-        # trade_cal 都没有,轮询只会每分钟刷一条同样的"日历缺失"。
+        app.state.pi_agent_status = {"availability": "unavailable", "reason": "Pi Agent 尚未启动"}
+        try:
+            import os
+            settings = load_settings_with_local()
+            ai = settings.get("ai") or {}
+            api_key = os.environ.get(str(ai.get("api_key_env") or "WORKBENCH_AI_API_KEY"))
+            if not api_key:
+                raise RuntimeError("模型凭据未配置")
+            handle = pi_supervisor.start(base_url="http://127.0.0.1:43123", model_api_key=api_key)
+            app.state.pi_agent_handle = handle
+            app.state.pi_agent_status = {"availability": "available", "base_url": handle.base_url}
+            agent_judge_manager.set_pi_agent_status(app.state.pi_agent_status, handle.client)
+            pipeline_manager.set_pi_agent_client(handle.client)
+        except Exception as exc:
+            app.state.pi_agent_handle = None
+            reason = str(exc).strip() or "Pi Agent 启动失败"
+            app.state.pi_agent_status = {"availability": "unavailable", "reason": reason}
+            agent_judge_manager.set_pi_agent_status(app.state.pi_agent_status)
+            pipeline_manager.set_pi_agent_client(None)
+            logger.warning("Pi Agent unavailable: %s", type(exc).__name__)
         if migrated:
             scheduler.start()
         else:
@@ -99,6 +126,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         news_collect_manager.shutdown()
         agent_judge_manager.shutdown()
         scan_manager.shutdown()
+        pi_supervisor.close()
 
     app = FastAPI(
         title="Hermes Quant Workbench",
@@ -111,11 +139,14 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.state.pipeline_manager = pipeline_manager
     app.state.news_collect_manager = news_collect_manager
     app.state.agent_judge_manager = agent_judge_manager
+    app.state.experiment_service = experiment_service
+    app.state.returns_service = returns_service
     app.state.scheduler = scheduler
     register_error_handlers(app)
 
     app.include_router(health.router, prefix="/api")
     app.include_router(kline.router, prefix="/api")
+    app.state.pi_agent_supervisor = pi_supervisor
     app.include_router(overview.router, prefix="/api")
     app.include_router(scans.router, prefix="/api")
     app.include_router(screener.router, prefix="/api")
@@ -124,6 +155,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(watchlist.router, prefix="/api")
     app.include_router(analytics.router, prefix="/api")
     app.include_router(backtest.router, prefix="/api")
+    app.include_router(experiments.router, prefix="/api")
+    app.include_router(returns.router, prefix="/api")
     app.include_router(news.router, prefix="/api")
     app.include_router(reviews.router, prefix="/api")
     app.include_router(agents.router, prefix="/api")

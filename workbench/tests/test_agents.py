@@ -97,7 +97,7 @@ def test_agent_config_clamp_nested_constraints():
     # depth 不能超过 candidates,final 不能超过 depth
     assert config.clamp(3, 5, 4) == (3, 3, 3)
     assert config.clamp(0, -1, -5) == (1, 1, 1)
-    assert config.clamp("50", "10", "2") == (50, 10, 2)
+    assert config.clamp("50", "10", "2") == (20, 10, 2)
 
 
 def test_load_agent_config_defaults():
@@ -113,6 +113,8 @@ def test_load_agent_config_custom_values():
                 "provider": "openai_compatible",
                 "model": "deepseek-chat",
                 "base_url": "https://api.example.com/v1",
+                "reasoning_effort": "low",
+                "max_tokens": 1200,
                 "default_candidates": 100,
                 "default_depth": 10,
                 "default_final": 5,
@@ -126,6 +128,8 @@ def test_load_agent_config_custom_values():
     assert config.provider == "openai_compatible"
     assert config.model == "deepseek-chat"
     assert config.base_url == "https://api.example.com/v1"
+    assert config.reasoning_effort == "low"
+    assert config.max_tokens == 1200
     assert config.default_candidates == 100
     assert config.default_depth == 10
     assert config.default_final == 5
@@ -170,8 +174,8 @@ def test_status_three_states(monkeypatch):
     monkeypatch.setenv(env_key, "sk-test")
     info = status(config, ai)
     assert info["availability"] == "available"
-    assert info["defaults"] == {"candidates": 200, "depth": 8, "final": 3}
-    assert info["limits"]["max_candidates"] == 200
+    assert info["defaults"] == {"candidates": 20, "depth": 20, "final": 3}
+    assert info["limits"]["max_candidates"] == 20
 
 
 # ---------------------------------------------------------------- 粗筛
@@ -348,9 +352,9 @@ def test_run_judge_clamps_parameters():
         depth=50,
         final_count=20,
     )
-    assert result["candidates_limit"] == 200
-    assert result["depth"] == 30
-    assert result["final_count"] == 10
+    assert result["candidates_limit"] == 20
+    assert result["depth"] == 20
+    assert result["final_count"] == 3
 
 
 def test_run_judge_fails_loudly_on_empty_model_output():

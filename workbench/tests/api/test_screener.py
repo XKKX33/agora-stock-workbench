@@ -81,3 +81,27 @@ def test_invalid_params_rejected(client):
     assert client.get("/api/screener", params={"page": 0}).status_code == 422
     assert client.get("/api/screener", params={"sort": "bogus"}).status_code == 422
     assert client.get("/api/screener", params={"order": "up"}).status_code == 422
+
+def test_fixed_scan_batch_read_returns_identity(client, db_path):
+    with __import__("engine.db", fromlist=["Store"]).Store(db_path, ensure_schema=False) as store:
+        run = store.latest_scan_run().iloc[0].to_dict()
+    response = client.get(
+        "/api/screener",
+        params={"run_id": run["run_id"], "as_of": run["as_of"], "strategy": run["strategy"]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_id"] == run["run_id"]
+    assert payload["as_of"] == run["as_of"]
+    assert payload["strategy"] == run["strategy"]
+    assert payload["config_hash"] == run["config_hash"]
+    assert payload["data_cutoff_at"] == run["data_cutoff_at"]
+    assert payload["meta"]["total"] == run["scored_count"]
+
+
+def test_unknown_fixed_scan_batch_does_not_fall_back_to_latest(client):
+    response = client.get(
+        "/api/screener",
+        params={"run_id": "missing-run", "as_of": "20200101", "strategy": "strong_mainup"},
+    )
+    assert response.status_code == 404

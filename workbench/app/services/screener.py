@@ -59,7 +59,18 @@ class ScreenerService:
         order: str = "desc",
         page: int = 1,
         per_page: int = 30,
+        run_id: str | None = None,
+        as_of: str | None = None,
+        strategy: str | None = None,
     ) -> dict:
+        """筛选行情或精确读取固定扫描批次;两条路径不互相回退。"""
+        if run_id is not None:
+            if not as_of or not strategy:
+                raise WorkbenchError("invalid_params", "固定批次查询必须同时提供 run_id、as_of、strategy", status_code=400)
+            run, frame = MarketRepository(self.db_path).scan_batch(run_id, as_of=as_of, strategy=strategy)
+            return self._scan_batch_payload(run, frame, page=page, per_page=per_page)
+        if as_of is not None or strategy is not None:
+            raise WorkbenchError("invalid_params", "固定批次查询必须提供 run_id、as_of、strategy", status_code=400)
         """筛选全市场最新行情,返回 as_of/items/meta。"""
         if page < 1 or per_page < 1 or per_page > 200:
             raise WorkbenchError(
@@ -142,6 +153,41 @@ class ScreenerService:
             }
             for _, row in page_frame.iterrows()
         ]
+
+        return {
+            "as_of": as_of,
+            "items": items,
+            "meta": {
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "pages": math.ceil(total / per_page) if total else 0,
+            },
+        }
+
+    def _scan_batch_payload(self, run: dict, frame: pd.DataFrame, *, page: int, per_page: int) -> dict:
+        if page < 1 or per_page < 1 or per_page > 200:
+            raise WorkbenchError("invalid_params", "page 需 >= 1,per_page 需在 1~200 之间", status_code=400)
+        frame = frame.copy()
+        total = len(frame)
+        start = (page - 1) * per_page
+        rows = frame.iloc[start:start + per_page]
+        items = []
+        for _, row in rows.iterrows():
+            items.append({
+                "ts_code": self._clean(row.get("ts_code")), "name": self._clean(row.get("name")),
+                "industry": self._clean(row.get("industry")), "rank": self._clean(row.get("rank")),
+                "total": self._clean(row.get("total")), "passed": bool(row.get("passed")),
+                "selected": bool(row.get("selected")), "money_class": self._clean(row.get("money_class")),
+                "one_line": self._clean(row.get("one_line")),
+            })
+        return {
+            "run_id": run.get("run_id"), "as_of": run.get("as_of"), "strategy": run.get("strategy"),
+            "config_hash": run.get("config_hash"), "candidate_hash": run.get("candidate_hash"),
+            "data_cutoff_at": run.get("data_cutoff_at"), "items": items,
+            "meta": {"page": page, "per_page": per_page, "total": total,
+                     "pages": math.ceil(total / per_page) if total else 0},
+        }
         return {
             "as_of": as_of,
             "items": items,

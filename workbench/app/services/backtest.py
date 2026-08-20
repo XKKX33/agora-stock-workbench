@@ -21,16 +21,33 @@ class BacktestService:
         horizon: str = "ret5",
         top_k: int = 5,
         cost_bps: float | None = None,
+        buy_cost_bps: float | None = None,
+        sell_cost_bps: float | None = None,
+        strategy_config_hash: str | None = None,
+        signal_start: str | None = None,
+        signal_end: str | None = None,
+        visible_cutoff: str | None = None,
+        rebalance_mode: str = "non_overlap",
+        limit_up_fill_policy: str = "skip",
     ) -> dict:
-        """单策略回测。horizon 非法时由 engine 抛 ValueError,不在这里猜默认值。"""
-        cost = bt.DEFAULT_COST_BPS if cost_bps is None else float(cost_bps)
+        """单策略回测；旧 cost_bps 在此保留为等值双边成本假设。"""
+        if cost_bps is None and buy_cost_bps is None and sell_cost_bps is None:
+            cost_bps = bt.DEFAULT_COST_BPS
         frame = self.repository.picks(strategy)
         result = bt.run_backtest(
             frame,
             horizon=horizon,
             strategy=strategy,
             top_k=top_k,
-            cost_bps=cost,
+            cost_bps=cost_bps,
+            buy_cost_bps=buy_cost_bps,
+            sell_cost_bps=sell_cost_bps,
+            strategy_config_hash=strategy_config_hash,
+            signal_start=signal_start,
+            signal_end=signal_end,
+            visible_cutoff=visible_cutoff,
+            rebalance_mode=rebalance_mode,
+            limit_up_fill_policy=limit_up_fill_policy,
         )
         payload = result.as_dict()
         payload["horizons"] = bt.horizons()
@@ -43,23 +60,21 @@ class BacktestService:
         horizon: str = "ret5",
         top_k: int = 5,
         cost_bps: float | None = None,
+        buy_cost_bps: float | None = None,
+        sell_cost_bps: float | None = None,
     ) -> dict:
-        """多策略并排。只有一个策略时照样返回一条,不假装"无法对比"。"""
-        cost = bt.DEFAULT_COST_BPS if cost_bps is None else float(cost_bps)
+        """多策略并排,使用与单策略相同的成本口径。"""
         results = bt.compare_strategies(
-            self.repository.picks(None),
-            horizon=horizon,
-            top_k=top_k,
-            cost_bps=cost,
+            self.repository.picks(None), horizon=horizon, top_k=top_k,
+            cost_bps=cost_bps, buy_cost_bps=buy_cost_bps, sell_cost_bps=sell_cost_bps,
         )
         return {
             "horizon": horizon,
             "top_k": top_k,
-            "cost_bps": cost,
+            "cost_bps": cost_bps,
             "available": any(r.available for r in results),
             "items": [self._summary(r) for r in results],
         }
-
     @staticmethod
     def _summary(result: bt.BacktestResult) -> dict:
         """对比表只要摘要 + 曲线,不带逐期持仓明细——那是单策略详情页的事。"""
