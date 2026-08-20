@@ -87,8 +87,8 @@ class WatchlistService:
             raise WorkbenchError(
                 "invalid_params", "ts_code 不能为空", status_code=400
             )
-        self.repository.add_watchlist(ts_code, note)
-        return {"ts_code": ts_code, "added": True}
+        added = self.repository.add_watchlist(ts_code, note)
+        return {"ts_code": ts_code, "added": added}
 
     def remove(self, ts_code: str) -> dict:
         """删除自选股;原本不存在也算删除成功(幂等)。"""

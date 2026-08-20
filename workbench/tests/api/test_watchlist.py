@@ -50,6 +50,7 @@ def test_watchlist_add_list_remove_roundtrip(client):
     # 重复添加幂等:总数不变
     resp = client.post("/api/watchlist", json={"ts_code": "600001.SH"})
     assert resp.status_code == 200
+    assert resp.json()["added"] is False
     assert client.get("/api/watchlist").json()["meta"]["total"] == 2
 
     # 删除一只

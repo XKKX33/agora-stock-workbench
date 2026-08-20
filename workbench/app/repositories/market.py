@@ -92,6 +92,22 @@ class MarketRepository:
                 status_code=404,
             )
         return run, self.scan_rows(str(run["run_id"]))
+    def scan_batch(
+        self,
+        run_id: str,
+        *,
+        as_of: str | None = None,
+        strategy: str | None = None,
+    ) -> tuple[dict[str, Any], pd.DataFrame]:
+        """按 run_id 严格读取扫描批次,约束不匹配时明确失败。"""
+        self.ensure_database()
+        try:
+            with Store(self.db_path, ensure_schema=False) as store:
+                return store.scan_batch(run_id, as_of=as_of, strategy=strategy)
+        except WorkbenchError:
+            raise
+        except RuntimeError as exc:
+            raise WorkbenchError("scan_not_found", str(exc), status_code=404) from exc
 
     def history(self, ts_code: str, as_of: str, bars: int = 120) -> pd.DataFrame:
         self.ensure_database()
@@ -194,7 +210,7 @@ class MarketRepository:
                     )
                 raise
 
-    def add_watchlist(self, ts_code: str, note: str | None = None) -> None:
+    def add_watchlist(self, ts_code: str, note: str | None = None) -> bool:
         """加入自选股:股票不存在抛 404,重复添加幂等。"""
         self.ensure_database()
         with Store(self.db_path, ensure_schema=True) as store:
@@ -205,7 +221,7 @@ class MarketRepository:
                 raise WorkbenchError(
                     "stock_not_found", f"未找到股票 {ts_code}", status_code=404
                 )
-            store.add_watchlist(ts_code, row[0], note)
+            return store.add_watchlist(ts_code, row[0], note)
 
     def remove_watchlist(self, ts_code: str) -> bool:
         """删除自选股,返回是否原本存在。"""

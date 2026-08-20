@@ -85,7 +85,7 @@ def industry_meta(ind: pd.DataFrame) -> Tuple[Dict[str, float], Dict[str, int], 
 def build_candidates(
     df: pd.DataFrame, ind: pd.DataFrame, top_inds: List[str], limit: int
 ) -> pd.DataFrame:
-    """候选种子:热门行业内领涨 + 全场领涨 + 大额 + 高量比,去重后按 seed 取 limit。"""
+    """候选种子:热门行业内领涨 + 全场领涨 + 大额,去重后按 seed 取 limit。"""
     parts = [
         df[df["industry"].isin(top_inds)].sort_values(
             ["pct_chg", "amount"], ascending=False
@@ -93,14 +93,11 @@ def build_candidates(
         df.sort_values(["pct_chg", "amount"], ascending=False).head(180),
         df.sort_values("amount", ascending=False).head(160),
     ]
-    if "volume_ratio" in df.columns:
-        parts.append(df.sort_values("volume_ratio", ascending=False).head(120))
     cand = pd.concat(parts).drop_duplicates("ts_code")
     cand = cand.copy()
     cand["seed_score"] = (
         cand["pct_chg"].fillna(0) * 2
         + np.log1p(cand["amount"].fillna(0)) / 2
-        + (cand["volume_ratio"].fillna(1) if "volume_ratio" in cand.columns else 1.0)
     )
     return cand.sort_values("seed_score", ascending=False).head(limit).reset_index(drop=True)
 

@@ -46,6 +46,17 @@ CREATE TABLE IF NOT EXISTS stock_basic (
     market    VARCHAR,
     list_date VARCHAR
 );
+CREATE TABLE IF NOT EXISTS security_lifecycle (
+    ts_code      VARCHAR PRIMARY KEY,
+    list_date    VARCHAR,
+    delist_date  VARCHAR,
+    list_status  VARCHAR
+);
+CREATE TABLE IF NOT EXISTS suspend_daily (
+    ts_code    VARCHAR,
+    trade_date VARCHAR,
+    PRIMARY KEY (ts_code, trade_date)
+);
 CREATE TABLE IF NOT EXISTS daily (
     ts_code    VARCHAR,
     trade_date VARCHAR,
@@ -97,10 +108,13 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     run_date              VARCHAR,
     as_of                 VARCHAR,
     strategy              VARCHAR,
+    config_hash           VARCHAR,
+    candidate_hash        VARCHAR,
+    data_cutoff_at        VARCHAR,
     candidate_count       INTEGER,
     scored_count          INTEGER,
     passed_count          INTEGER,
-    final_count           INTEGER,
+    final_count            INTEGER,
     top_industries_json   VARCHAR
 );
 CREATE TABLE IF NOT EXISTS scan_rows (
@@ -122,7 +136,7 @@ CREATE TABLE IF NOT EXISTS scan_rows (
 );
 CREATE TABLE IF NOT EXISTS task_runs (
     task_id      VARCHAR PRIMARY KEY,
-    kind         VARCHAR,   -- scan / postmortem / news / close_pipeline
+    kind         VARCHAR,   -- scan / news / one_click_pipeline / agent_judge
     trade_date   VARCHAR,   -- 业务日期(as_of),幂等作用域的一部分
     strategy     VARCHAR,
     status       VARCHAR,   -- queued / running / succeeded / failed
@@ -132,6 +146,13 @@ CREATE TABLE IF NOT EXISTS task_runs (
     heartbeat_at VARCHAR,   -- 运行中心跳,用于识别进程崩溃遗留的僵死任务
     result_json  VARCHAR,
     error_json   VARCHAR
+);
+CREATE TABLE IF NOT EXISTS task_claims (
+    kind         VARCHAR,
+    trade_date   VARCHAR,
+    strategy_key VARCHAR,
+    task_id      VARCHAR,
+    PRIMARY KEY (kind, trade_date, strategy_key)
 );
 CREATE TABLE IF NOT EXISTS news_sources (
     source_id    VARCHAR PRIMARY KEY,  -- 采集器内部标识,如 cninfo_notice
@@ -244,7 +265,8 @@ CREATE TABLE IF NOT EXISTS experiment_runs (
     finished_at         VARCHAR,
     error_json          VARCHAR
 );
--- 四组实验明细：收益及状态保持 NULL，直到真实市场数据可用
+-- 四组实验明细：只存决策本身。成交与收益一律落 experiment_returns，
+-- 这张表不再有 entry_*/ret* 列——两套口径并存过一段时间，旧列早已没人回填。
 CREATE TABLE IF NOT EXISTS experiment_decisions (
     run_id             VARCHAR,
     group_name         VARCHAR,
@@ -257,28 +279,29 @@ CREATE TABLE IF NOT EXISTS experiment_decisions (
     hybrid_score       DOUBLE,
     reason_json        VARCHAR,
     risk_json          VARCHAR,
-    entry_date         VARCHAR,
-    entry_price        DOUBLE,
-    entry_status       VARCHAR,
-    entry_reason       VARCHAR,
-    ret1               DOUBLE,
-    ret1_target_date   VARCHAR,
-    ret1_status        VARCHAR,
-    ret1_reason        VARCHAR,
-    ret3               DOUBLE,
-    ret3_target_date   VARCHAR,
-    ret3_status        VARCHAR,
-    ret3_reason        VARCHAR,
-    ret5               DOUBLE,
-    ret5_target_date   VARCHAR,
-    ret5_status        VARCHAR,
-    ret5_reason        VARCHAR,
-    ret10              DOUBLE,
-    ret10_target_date  VARCHAR,
-    ret10_status       VARCHAR,
-    ret10_reason       VARCHAR,
     PRIMARY KEY (run_id, group_name, ts_code)
 );
+
+-- 成交与收益的唯一去处：T+1 收盘、T+2 开盘至 T+10 开盘各一行，可单独重试。
+-- 算不出就留 status/reason，绝不用 0 冒充「没赚没亏」。
+CREATE TABLE IF NOT EXISTS experiment_returns (
+    run_id       VARCHAR,
+    group_name   VARCHAR,
+    ts_code      VARCHAR,
+    horizon      VARCHAR,
+    entry_date   VARCHAR,
+    entry_price  DOUBLE,
+    sell_date    VARCHAR,
+    sell_session VARCHAR,
+    sell_price   DOUBLE,
+    status       VARCHAR,
+    reason       VARCHAR,
+    gross_return DOUBLE,
+    created_at   VARCHAR,
+    updated_at   VARCHAR,
+    PRIMARY KEY (run_id, group_name, ts_code, horizon)
+);
+
 
 -- 多 agent 短线研判:每次研判一个批次(粗筛/深度学习/辩论/最终)
 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -311,6 +334,37 @@ CREATE TABLE IF NOT EXISTS agent_judgments (
     stage_json VARCHAR,                 -- JSON:粗筛理由/三分析师/辩论纪要
     PRIMARY KEY (run_id, ts_code)
 );
+
+-- Agent 公开结构化会话事件:每个 run 内按 seq 追加且可断点续读
+CREATE TABLE IF NOT EXISTS agent_events (
+    run_id         VARCHAR,
+    seq            INTEGER,
+    event_id       VARCHAR,
+    event_type     VARCHAR,
+    ts_code        VARCHAR,
+    stage          VARCHAR,
+    role           VARCHAR,
+    round_no       INTEGER,
+    content_json   VARCHAR,
+    citations_json VARCHAR,
+    status         VARCHAR,
+    created_at     VARCHAR,
+    PRIMARY KEY (run_id, seq)
+);
 """
 
-__all__ = ["_SCHEMA", "_PICKS_SCHEMA"]
+# experiment_decisions 上被 experiment_returns 取代的旧列。
+# `Store(ensure_schema=True)` 每次开库都会把还残留的这些列 DROP 掉。
+_LEGACY_DECISION_COLUMNS = (
+    "entry_date",
+    "entry_price",
+    "entry_status",
+    "entry_reason",
+    *(
+        f"ret{horizon}{suffix}"
+        for horizon in (1, 3, 5, 10)
+        for suffix in ("", "_target_date", "_status", "_reason")
+    ),
+)
+
+__all__ = ["_SCHEMA", "_PICKS_SCHEMA", "_LEGACY_DECISION_COLUMNS"]

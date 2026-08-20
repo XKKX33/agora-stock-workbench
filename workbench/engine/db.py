@@ -29,9 +29,10 @@ from typing import Iterable, Optional
 import duckdb
 import pandas as pd
 
+from .db_agents import AgentEventMixin
 from .db_experiments import ExperimentMixin
 from .db_news import NewsAgentMixin
-from .schema import _PICKS_SCHEMA, _SCHEMA
+from .schema import _LEGACY_DECISION_COLUMNS, _PICKS_SCHEMA, _SCHEMA
 
 
 def _is_stale(last_seen: Optional[str], now: str, stale_after_seconds: int) -> bool:
@@ -52,9 +53,8 @@ def _is_stale(last_seen: Optional[str], now: str, stale_after_seconds: int) -> b
     return (b - a).total_seconds() > stale_after_seconds
 
 
-class Store(ExperimentMixin, NewsAgentMixin):
+class Store(AgentEventMixin, ExperimentMixin, NewsAgentMixin):
     """DuckDB 连接封装。用作上下文管理器,自动关闭。
-
     ensure_schema:
         True (默认,写路径) —— 建表(IF NOT EXISTS)后再用。
         False (读路径) —— 不执行任何 DDL,也不创建父目录。
@@ -91,7 +91,23 @@ class Store(ExperimentMixin, NewsAgentMixin):
             raise last_exc
         if ensure_schema:
             self.con.execute(_SCHEMA)
+            self._migrate_scan_metadata()
             self._migrate_picks_pk()
+            self._drop_legacy_decision_columns()
+            self._sync_task_claims()
+
+    def _migrate_scan_metadata(self) -> None:
+        """Add audit columns required to identify immutable strategy batches."""
+        existing = {
+            str(row[0])
+            for row in self.con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'scan_runs'"
+            ).fetchall()
+        }
+        for column in ("config_hash", "candidate_hash", "data_cutoff_at"):
+            if column not in existing:
+                self.con.execute(f"ALTER TABLE scan_runs ADD COLUMN {column} VARCHAR")
 
     def _migrate_picks_pk(self) -> None:
         """把 picks 旧主键 (run_date, strategy, ts_code) 迁移为业务幂等键 (as_of, strategy, ts_code)。
@@ -130,6 +146,58 @@ class Store(ExperimentMixin, NewsAgentMixin):
             self.con.execute("ROLLBACK")
             raise
 
+    def _drop_legacy_decision_columns(self) -> None:
+        """删掉 experiment_decisions 上早已没人回填的成交/收益列。
+
+        成交与收益现在只落 experiment_returns（一个 horizon 一行、可单独重试）。
+        这些旧列在生产链路里最后一个写入方被移除后就永远是 NULL,留着只会让
+        台账页显示一片空白的"legacy"列。DuckDB 的 DROP COLUMN 是元数据操作,
+        不重写数据;整个迁移一个事务,任一列失败就回滚,不留半迁移状态。
+        """
+        existing = {
+            row[0]
+            for row in self.con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'experiment_decisions'"
+            ).fetchall()
+        }
+        stale = [column for column in _LEGACY_DECISION_COLUMNS if column in existing]
+        if not stale:
+            return
+        self.con.execute("BEGIN TRANSACTION")
+        try:
+            for column in stale:
+                self.con.execute(
+                    f"ALTER TABLE experiment_decisions DROP COLUMN {column}"
+                )
+            self.con.execute("COMMIT")
+        except Exception:
+            self.con.execute("ROLLBACK")
+            raise
+
+    def _sync_task_claims(self) -> None:
+        """为升级前的任务补业务键指针；每个键只指向最近一条记录。"""
+        rows = self.con.execute(
+            """
+            SELECT task_id, kind, trade_date, COALESCE(strategy, '')
+            FROM task_runs
+            WHERE kind IS NOT NULL AND trade_date IS NOT NULL
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY kind, trade_date, COALESCE(strategy, '')
+                ORDER BY created_at DESC, task_id DESC
+            ) = 1
+            """
+        ).fetchall()
+        for task_id, kind, trade_date, strategy_key in rows:
+            self.con.execute(
+                """
+                INSERT INTO task_claims (kind, trade_date, strategy_key, task_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                [kind, trade_date, strategy_key, task_id],
+            )
+
     def __enter__(self) -> "Store":
         return self
 
@@ -150,16 +218,32 @@ class Store(ExperimentMixin, NewsAgentMixin):
         cols = self._table_cols(table)
         use = [c for c in df.columns if c in cols]
         d = df[use].copy()
-        self.con.register("_stg", d)
-        key_list = [k for k in keys if k in use]
-        if key_list:
-            on = " AND ".join(f"t.{k} = s.{k}" for k in key_list)
+        owns_transaction = not self._has_active_transaction()
+        registered = False
+        try:
+            if owns_transaction:
+                self.con.execute("BEGIN TRANSACTION")
+            self.con.register("_stg", d)
+            registered = True
+            key_list = [k for k in keys if k in use]
+            if key_list:
+                on = " AND ".join(f"t.{k} = s.{k}" for k in key_list)
+                self.con.execute(
+                    f"DELETE FROM {table} t USING _stg s WHERE {on}"
+                )
+            collist = ", ".join(use)
             self.con.execute(
-                f"DELETE FROM {table} t USING _stg s WHERE {on}"
+                f"INSERT INTO {table} ({collist}) SELECT {collist} FROM _stg"
             )
-        collist = ", ".join(use)
-        self.con.execute(f"INSERT INTO {table} ({collist}) SELECT {collist} FROM _stg")
-        self.con.unregister("_stg")
+            if owns_transaction:
+                self.con.execute("COMMIT")
+        except Exception:
+            if owns_transaction:
+                self.con.execute("ROLLBACK")
+            raise
+        finally:
+            if registered:
+                self.con.unregister("_stg")
         return len(d)
 
     def _table_cols(self, table: str) -> set[str]:
@@ -234,13 +318,13 @@ class Store(ExperimentMixin, NewsAgentMixin):
     # ------------------------------------------------------------ 自选股
     def add_watchlist(
         self, ts_code: str, name: str, note: str | None = None
-    ) -> None:
+    ) -> bool:
         """加入自选股:已存在保持原顺序(幂等),新加入追加到末尾。"""
         existed = self.con.execute(
             "SELECT 1 FROM watchlist WHERE ts_code = ?", [ts_code]
         ).fetchone()
         if existed is not None:
-            return
+            return False
         order = int(
             self.con.execute(
                 "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM watchlist"
@@ -254,6 +338,7 @@ class Store(ExperimentMixin, NewsAgentMixin):
             "VALUES (?, ?, ?, ?, ?)",
             [ts_code, name, note, order, added_at],
         )
+        return True
 
     def remove_watchlist(self, ts_code: str) -> bool:
         """删除自选股,返回是否原本存在。"""
@@ -389,6 +474,71 @@ class Store(ExperimentMixin, NewsAgentMixin):
             self.con.unregister("_stg_picks")
         return len(d)
 
+    def _replace_picks_in_transaction(
+        self,
+        as_of: str,
+        strategy: str,
+        df: pd.DataFrame,
+    ) -> int:
+        self.con.execute(
+            "DELETE FROM picks WHERE as_of = ? AND strategy = ?",
+            [as_of, strategy],
+        )
+        if df is None or df.empty:
+            return 0
+        if "as_of" not in df.columns or "strategy" not in df.columns:
+            raise ValueError("选股结果缺少 as_of 或 strategy")
+        if set(df["as_of"].astype(str)) != {as_of}:
+            raise ValueError("选股结果混入其他 as_of")
+        if set(df["strategy"].astype(str)) != {strategy}:
+            raise ValueError("选股结果混入其他 strategy")
+        cols = self._table_cols("picks")
+        use = [column for column in df.columns if column in cols]
+        staged = df[use].copy()
+        self.con.register("_replace_picks_stage", staged)
+        try:
+            column_list = ", ".join(use)
+            self.con.execute(
+                f"INSERT INTO picks ({column_list}) "
+                f"SELECT {column_list} FROM _replace_picks_stage"
+            )
+        finally:
+            self.con.unregister("_replace_picks_stage")
+        return len(staged)
+
+    def replace_picks(
+        self,
+        as_of: str,
+        strategy: str,
+        df: pd.DataFrame,
+    ) -> int:
+        """整组替换指定信号日的选股，空结果也会清除旧行。"""
+        owns_transaction = not self._has_active_transaction()
+        try:
+            if owns_transaction:
+                self.con.execute("BEGIN TRANSACTION")
+            count = self._replace_picks_in_transaction(as_of, strategy, df)
+            if owns_transaction:
+                self.con.execute("COMMIT")
+            return count
+        except Exception:
+            if owns_transaction:
+                self.con.execute("ROLLBACK")
+            raise
+
+    def _record_scan_in_transaction(self, run_row: dict, rows: pd.DataFrame) -> None:
+        run_id = run_row.get("run_id")
+        if run_row.get("as_of") is not None and run_row.get("strategy") is not None:
+            stale = self.con.execute(
+                "SELECT run_id FROM scan_runs WHERE as_of = ? AND strategy = ? "
+                "AND COALESCE(config_hash, '') = COALESCE(?, '') AND run_id <> ?",
+                [run_row.get("as_of"), run_row.get("strategy"), run_row.get("config_hash"), run_id],
+            ).fetchall()
+            for (old_run_id,) in stale:
+                self.con.execute("DELETE FROM scan_rows WHERE run_id = ?", [old_run_id])
+                self.con.execute("DELETE FROM scan_runs WHERE run_id = ?", [old_run_id])
+        self.upsert("scan_runs", pd.DataFrame([run_row]), keys=("run_id",))
+        self.upsert("scan_rows", rows, keys=("run_id", "ts_code"))
     def record_scan(self, run_row: dict, rows: pd.DataFrame) -> None:
         """原子写入扫描批次与全部候选明细,并清理同业务键的旧批次。
 
@@ -401,30 +551,16 @@ class Store(ExperimentMixin, NewsAgentMixin):
         所有旧批次(含其明细行),再插入本次。这样"同一交易日重复运行"
         在库里只留最后一次结果,不产生重复批次。
         """
-        run_df = pd.DataFrame([run_row])
-        as_of = run_row.get("as_of")
-        strategy = run_row.get("strategy")
-        self.con.execute("BEGIN TRANSACTION")
+        owns_transaction = not self._has_active_transaction()
         try:
-            if as_of is not None and strategy is not None:
-                # 先按业务键找出待清理的旧 run_id(排除本次),再删明细与批次
-                stale = self.con.execute(
-                    "SELECT run_id FROM scan_runs "
-                    "WHERE as_of = ? AND strategy = ? AND run_id <> ?",
-                    [as_of, strategy, run_row.get("run_id")],
-                ).fetchall()
-                for (old_run_id,) in stale:
-                    self.con.execute(
-                        "DELETE FROM scan_rows WHERE run_id = ?", [old_run_id]
-                    )
-                    self.con.execute(
-                        "DELETE FROM scan_runs WHERE run_id = ?", [old_run_id]
-                    )
-            self.upsert("scan_runs", run_df, keys=("run_id",))
-            self.upsert("scan_rows", rows, keys=("run_id", "ts_code"))
-            self.con.execute("COMMIT")
+            if owns_transaction:
+                self.con.execute("BEGIN TRANSACTION")
+            self._record_scan_in_transaction(run_row, rows)
+            if owns_transaction:
+                self.con.execute("COMMIT")
         except Exception:
-            self.con.execute("ROLLBACK")
+            if owns_transaction:
+                self.con.execute("ROLLBACK")
             raise
 
     def scan_runs(self, strategy: Optional[str] = None) -> pd.DataFrame:
@@ -455,6 +591,34 @@ class Store(ExperimentMixin, NewsAgentMixin):
             "SELECT * FROM scan_rows WHERE run_id = ? ORDER BY rank ASC",
             [run_id],
         ).df()
+    def scan_batch(
+        self,
+        run_id: str,
+        *,
+        as_of: Optional[str] = None,
+        strategy: Optional[str] = None,
+    ) -> tuple[dict, pd.DataFrame]:
+        """按明确批次身份读取摘要及明细,绝不回退最近批次。"""
+        if not str(run_id).strip():
+            raise RuntimeError("扫描批次 run_id 不能为空")
+        row = self.con.execute(
+            "SELECT * FROM scan_runs WHERE run_id = ?", [str(run_id)]
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"扫描批次 {run_id} 不存在")
+        columns = [item[0] for item in self.con.description]
+        run = dict(zip(columns, row))
+        if as_of is not None and str(run.get("as_of")) != str(as_of):
+            raise RuntimeError(
+                f"扫描批次 {run_id} 日期不匹配: 期望 {as_of}, 实际 {run.get('as_of')}"
+            )
+        if strategy is not None and str(run.get("strategy")) != str(strategy):
+            raise RuntimeError(
+                f"扫描批次 {run_id} 策略不匹配: 期望 {strategy}, 实际 {run.get('strategy')}"
+            )
+        if str(run.get("status") or "").lower() == "failed":
+            raise RuntimeError(f"扫描批次 {run_id} 已失败")
+        return run, self.scan_rows(str(run_id))
 
     def open_picks_awaiting_return(self, horizon_col: str) -> pd.DataFrame:
         """尚未回填某期收益的历史选股(供自动复盘补算)。"""
@@ -518,7 +682,7 @@ class Store(ExperimentMixin, NewsAgentMixin):
         stale_after_seconds: int = 3600,
         force: bool = False,
     ) -> tuple[bool, Optional[dict]]:
-        """尝试登记一个任务,返回 (是否抢到, 冲突任务或 None)。
+        """用业务键锁表登记任务，返回 (是否抢到, 冲突任务或 None)。
 
         幂等作用域 = (kind, trade_date, strategy)。语义:
         - 已有 succeeded 记录  -> 不抢(除非 force),让调用方跳过。
@@ -527,85 +691,214 @@ class Store(ExperimentMixin, NewsAgentMixin):
         - 已有 queued/running 但心跳超时(进程崩溃遗留) -> 判为僵死,允许抢占。
         - 已有 failed -> 允许重试。
 
-        写入放在单事务内。DuckDB 单写者模型下,跨进程的并发抢占由文件写锁
-        串行化,故"检查+插入"不会两个进程同时成功。
+        `task_claims` 的复合主键是数据库级唯一约束；两个独立连接同时抢占时，
+        只有一个能把锁行指向自己的 task_id。
         """
-        self.con.execute("BEGIN TRANSACTION")
-        try:
-            existing = self.con.execute(
-                """
-                SELECT task_id, status, created_at, started_at, finished_at,
-                       heartbeat_at, result_json, error_json
-                FROM task_runs
-                WHERE kind = ? AND trade_date = ?
-                  AND COALESCE(strategy, '') = COALESCE(?, '')
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                [kind, trade_date, strategy],
-            ).fetchone()
-
-            if existing is not None and not force:
-                status = existing[1]
-                conflict = {
-                    "task_id": existing[0],
-                    "status": status,
-                    "created_at": existing[2],
-                    "started_at": existing[3],
-                    "finished_at": existing[4],
-                    "heartbeat_at": existing[5],
-                    "result_json": existing[6],
-                    "error_json": existing[7],
-                }
-                if status == "succeeded":
-                    self.con.execute("COMMIT")
-                    return False, conflict
-                if status in ("queued", "running"):
-                    if not _is_stale(existing[5] or existing[2], now, stale_after_seconds):
-                        self.con.execute("COMMIT")
-                        return False, conflict
-                    # 心跳超时:标记僵死,继续往下抢占
-                    self.con.execute(
+        strategy_key = strategy or ""
+        for attempt in range(5):
+            started = False
+            try:
+                self.con.execute("BEGIN TRANSACTION")
+                started = True
+                pointer = self.con.execute(
+                    """
+                    SELECT task_id FROM task_claims
+                    WHERE kind = ? AND trade_date = ? AND strategy_key = ?
+                    """,
+                    [kind, trade_date, strategy_key],
+                ).fetchone()
+                existing = None
+                if pointer is None:
+                    inserted = self.con.execute(
                         """
-                        UPDATE task_runs
-                        SET status = 'failed',
-                            finished_at = ?,
-                            error_json = ?
-                        WHERE task_id = ?
+                        INSERT INTO task_claims
+                            (kind, trade_date, strategy_key, task_id)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT DO NOTHING
+                        RETURNING task_id
                         """,
-                        [
-                            now,
-                            '{"type":"StaleTask","message":"心跳超时,判定进程已崩溃"}',
-                            existing[0],
-                        ],
-                    )
+                        [kind, trade_date, strategy_key, task_id],
+                    ).fetchone()
+                    if inserted is None:
+                        self.con.execute("ROLLBACK")
+                        started = False
+                        continue
+                else:
+                    existing = self.con.execute(
+                        """
+                        SELECT task_id, status, created_at, started_at, finished_at,
+                               heartbeat_at, result_json, error_json
+                        FROM task_runs WHERE task_id = ?
+                        """,
+                        [pointer[0]],
+                    ).fetchone()
+                    if existing is None:
+                        raise RuntimeError("task_claims 指向不存在的任务")
 
+                if existing is not None and not force:
+                    status = existing[1]
+                    conflict = {
+                        "task_id": existing[0],
+                        "status": status,
+                        "created_at": existing[2],
+                        "started_at": existing[3],
+                        "finished_at": existing[4],
+                        "heartbeat_at": existing[5],
+                        "result_json": existing[6],
+                        "error_json": existing[7],
+                    }
+                    if status == "succeeded" or (
+                        status in ("queued", "running")
+                        and not _is_stale(
+                            existing[5] or existing[2], now, stale_after_seconds
+                        )
+                    ):
+                        self.con.execute("COMMIT")
+                        started = False
+                        return False, conflict
+                    if status in ("queued", "running"):
+                        stale_error = (
+                            '{"type":"StaleTask",'
+                            '"message":"心跳超时,判定进程已崩溃"}'
+                        )
+                        self.con.execute(
+                            """
+                            UPDATE task_runs
+                            SET status = 'failed', finished_at = ?,
+                                error_json = ?
+                            WHERE task_id = ?
+                            """,
+                            [
+                                now,
+                                stale_error,
+                                existing[0],
+                            ],
+                        )
+                        self.con.execute(
+                            """
+                            UPDATE experiment_runs
+                            SET status = 'failed', finished_at = ?, error_json = ?
+                            WHERE run_id = ? AND status IN ('queued', 'running')
+                            """,
+                            [now, stale_error, existing[0]],
+                        )
+
+                if existing is not None:
+                    updated = self.con.execute(
+                        """
+                        UPDATE task_claims SET task_id = ?
+                        WHERE kind = ? AND trade_date = ? AND strategy_key = ?
+                          AND task_id = ?
+                        RETURNING task_id
+                        """,
+                        [task_id, kind, trade_date, strategy_key, existing[0]],
+                    ).fetchone()
+                    if updated is None:
+                        self.con.execute("ROLLBACK")
+                        started = False
+                        continue
+
+                self.con.execute(
+                    """
+                    INSERT INTO task_runs
+                        (task_id, kind, trade_date, strategy, status,
+                         created_at, started_at, finished_at, heartbeat_at,
+                         result_json, error_json)
+                    VALUES (?, ?, ?, ?, 'queued', ?, NULL, NULL, ?, NULL, NULL)
+                    """,
+                    [task_id, kind, trade_date, strategy, now, now],
+                )
+                self.con.execute("COMMIT")
+                started = False
+                return True, None
+            except (duckdb.TransactionException, duckdb.ConstraintException):
+                if started:
+                    try:
+                        self.con.execute("ROLLBACK")
+                    except duckdb.TransactionException:
+                        # 提交期唯一键冲突会由 DuckDB 自动结束失败事务。
+                        pass
+                if attempt == 4:
+                    raise
+        raise RuntimeError("任务抢占重试耗尽")
+
+    def _rebind_task_claim_in_transaction(
+        self, task_id: str, trade_date: str
+    ) -> None:
+        task = self.con.execute(
+            "SELECT kind, trade_date, COALESCE(strategy, '') FROM task_runs "
+            "WHERE task_id = ?",
+            [task_id],
+        ).fetchone()
+        if task is None:
+            raise KeyError(f"任务不存在: {task_id}")
+        kind, old_date, strategy_key = task
+        if old_date == trade_date:
+            return
+        target = self.con.execute(
+            """
+            SELECT c.task_id, r.status
+            FROM task_claims c JOIN task_runs r ON r.task_id = c.task_id
+            WHERE c.kind = ? AND c.trade_date = ? AND c.strategy_key = ?
+            """,
+            [kind, trade_date, strategy_key],
+        ).fetchone()
+        if target is not None and target[0] != task_id and target[1] in (
+            "queued", "running", "succeeded"
+        ):
+            raise ValueError(f"真实业务日期已被任务占用: {trade_date}")
+        if target is None:
             self.con.execute(
-                """
-                INSERT INTO task_runs
-                    (task_id, kind, trade_date, strategy, status,
-                     created_at, started_at, finished_at, heartbeat_at,
-                     result_json, error_json)
-                VALUES (?, ?, ?, ?, 'queued', ?, NULL, NULL, ?, NULL, NULL)
-                """,
-                [task_id, kind, trade_date, strategy, now, now],
+                "INSERT INTO task_claims VALUES (?, ?, ?, ?)",
+                [kind, trade_date, strategy_key, task_id],
             )
-            self.con.execute("COMMIT")
-            return True, None
-        except Exception:
-            self.con.execute("ROLLBACK")
-            raise
+        else:
+            self.con.execute(
+                "UPDATE task_claims SET task_id = ? "
+                "WHERE kind = ? AND trade_date = ? AND strategy_key = ?",
+                [task_id, kind, trade_date, strategy_key],
+            )
+        self.con.execute(
+            "DELETE FROM task_claims WHERE kind = ? AND trade_date = ? "
+            "AND strategy_key = ? AND task_id = ?",
+            [kind, old_date, strategy_key, task_id],
+        )
 
     def mark_task_running(self, task_id: str, now: str) -> None:
-        self.con.execute(
+        updated = self.con.execute(
             "UPDATE task_runs SET status='running', started_at=?, heartbeat_at=? "
-            "WHERE task_id = ?",
+            "WHERE task_id = ? AND status='queued' RETURNING task_id",
             [now, now, task_id],
-        )
+        ).fetchone()
+        if updated is not None:
+            return
+        current = self.con.execute(
+            "SELECT status FROM task_runs WHERE task_id = ?", [task_id]
+        ).fetchone()
+        if current is None:
+            raise KeyError(f"任务不存在: {task_id}")
+        raise ValueError(f"任务不可改为运行中: {task_id}/{current[0]}")
 
     def task_heartbeat(self, task_id: str, now: str) -> None:
         self.con.execute(
             "UPDATE task_runs SET heartbeat_at = ? WHERE task_id = ?", [now, task_id]
         )
+
+    def update_task_progress(
+        self, task_id: str, now: str, result_json: str
+    ) -> None:
+        """同时保存心跳和可恢复的进行中结果。"""
+        updated = self.con.execute(
+            """
+            UPDATE task_runs
+            SET heartbeat_at = ?, result_json = ?
+            WHERE task_id = ? AND status = 'running'
+            RETURNING task_id
+            """,
+            [now, result_json, task_id],
+        ).fetchone()
+        if updated is None:
+            raise KeyError(f"运行中的任务不存在: {task_id}")
 
     def finish_task(
         self,
@@ -626,18 +919,30 @@ class Store(ExperimentMixin, NewsAgentMixin):
         """
         if status not in ("succeeded", "failed"):
             raise ValueError(f"非法终态: {status}")
-        if trade_date is None:
+        self.con.execute("BEGIN TRANSACTION")
+        try:
+            current = self.con.execute(
+                "SELECT status FROM task_runs WHERE task_id = ?", [task_id]
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"任务不存在: {task_id}")
+            if current[0] in ("succeeded", "failed"):
+                if current[0] == status:
+                    self.con.execute("COMMIT")
+                    return
+                raise ValueError(f"任务已是终态，不可改写: {task_id}/{current[0]}")
+            if trade_date is not None:
+                self._rebind_task_claim_in_transaction(task_id, trade_date)
             self.con.execute(
                 "UPDATE task_runs SET status=?, finished_at=?, heartbeat_at=?, "
-                "result_json=?, error_json=? WHERE task_id = ?",
-                [status, now, now, result_json, error_json, task_id],
+                "result_json=?, error_json=?, trade_date=COALESCE(?, trade_date) "
+                "WHERE task_id = ?",
+                [status, now, now, result_json, error_json, trade_date, task_id],
             )
-            return
-        self.con.execute(
-            "UPDATE task_runs SET status=?, finished_at=?, heartbeat_at=?, "
-            "result_json=?, error_json=?, trade_date=? WHERE task_id = ?",
-            [status, now, now, result_json, error_json, trade_date, task_id],
-        )
+            self.con.execute("COMMIT")
+        except Exception:
+            self.con.execute("ROLLBACK")
+            raise
 
     def get_task(self, task_id: str) -> Optional[dict]:
         row = self.con.execute(
