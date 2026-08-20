@@ -25,7 +25,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Iterator, List, Optional, Protocol, runtime_checkable
 
 try:
     import httpx
@@ -61,6 +61,7 @@ class AIConfig:
     api_key_env:  凭据所在的环境变量名。
     temperature:  采样温度。默认 0.2,研判任务偏好稳定输出。
     max_tokens:   单次回答上限。
+    reasoning_effort: 模型推理强度；留空表示由提供方决定。
     """
 
     enabled: bool = False
@@ -70,6 +71,7 @@ class AIConfig:
     api_key_env: str = "WORKBENCH_AI_API_KEY"
     temperature: float = 0.2
     max_tokens: int = 2000
+    reasoning_effort: Optional[str] = None
 
     def api_key(self) -> Optional[str]:
         """读取凭据。空串按未配置处理——环境变量设成空值不算配置好了。"""
@@ -89,15 +91,7 @@ class ReviewNarrator(Protocol):
 
 
 class OpenAICompatibleClient:
-    """OpenAI 兼容接口的最小客户端。
-
-    只依赖 httpx(requirements 已有)。兼容层要点:
-    - base_url 由配置显式给出,绝不拼默认地址;
-    - 凭据走 Authorization: Bearer;本地服务可能不需要 key,此时 api_key 为空
-      也不拦——这是提供方差异,由调用方按 describe 的约定约束;
-    - json_mode=True 时优先带 response_format,服务不支持会报 400,调用方
-      可降级重试(提示词约束 JSON)。
-    """
+    """OpenAI-compatible chat client with redacted errors and SSE streaming."""
 
     def __init__(
         self,
@@ -115,6 +109,40 @@ class OpenAICompatibleClient:
             transport=transport,
         )
 
+    def _payload(
+        self,
+        messages: List[dict],
+        *,
+        json_mode: bool,
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "max_tokens": self.config.max_tokens if max_tokens is None else max_tokens,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        if self.config.reasoning_effort:
+            payload["reasoning_effort"] = self.config.reasoning_effort
+        if stream:
+            payload["stream"] = True
+        return payload
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        api_key = self.config.api_key()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+
+    @staticmethod
+    def _http_error(response: Any) -> AIRequestError:
+        return AIRequestError(f"模型接口返回 HTTP {response.status_code}")
+
     def chat(
         self,
         messages: List[dict],
@@ -124,55 +152,114 @@ class OpenAICompatibleClient:
         max_tokens: Optional[int] = None,
         retries: int = 2,
     ) -> str:
-        """发起一次对话补全,返回模型文本。
-
-        失败重试 2 次(连接错误 / 5xx),退避 1s/2s;4xx 不重试——
-        那是请求本身的问题,重试不会变好,只会拖慢失败路径。
-        """
-        payload: Dict[str, Any] = {
-            "model": self.config.model,
-            "messages": messages,
-            "temperature": (
-                self.config.temperature if temperature is None else temperature
-            ),
-            "max_tokens": self.config.max_tokens if max_tokens is None else max_tokens,
-        }
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
-        headers = {"Content-Type": "application/json"}
-        api_key = self.config.api_key()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
+        """发起一次对话补全,返回模型文本。"""
+        payload = self._payload(
+            messages,
+            json_mode=json_mode,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        headers = self._headers()
         last_error: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
-                response = self._client.post(
-                    self.endpoint, json=payload, headers=headers
-                )
+                response = self._client.post(self.endpoint, json=payload, headers=headers)
                 if response.status_code >= 400:
-                    raise AIRequestError(
-                        f"模型接口返回 HTTP {response.status_code}: "
-                        f"{response.text[:300]}"
-                    )
+                    error = self._http_error(response)
+                    if response.status_code >= 500 and attempt < retries:
+                        last_error = error
+                        time.sleep(1.0 * (attempt + 1))
+                        continue
+                    raise error
                 data = response.json()
                 return str(data["choices"][0]["message"]["content"])
             except AIRequestError:
                 raise
-            except Exception as error:  # noqa: BLE001 - 网络层故障统一重试
+            except Exception as error:  # noqa: BLE001 - network/parse failures are redacted
                 last_error = error
                 if attempt < retries:
                     time.sleep(1.0 * (attempt + 1))
-        raise AIRequestError(f"模型调用连续失败: {last_error}") from last_error
+        raise AIRequestError("模型调用连续失败: 网络或响应格式错误") from last_error
 
+    def chat_stream(
+        self,
+        messages: List[dict],
+        *,
+        json_mode: bool = False,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        retries: int = 2,
+    ) -> Iterator[str]:
+        """Stream textual deltas from OpenAI-compatible ``data:`` SSE lines."""
+        payload = self._payload(
+            messages,
+            json_mode=json_mode,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+        headers = self._headers()
+        last_error: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            yielded = False
+            finished = False
+            try:
+                with self._client.stream(
+                    "POST", self.endpoint, json=payload, headers=headers
+                ) as response:
+                    if response.status_code >= 400:
+                        error = self._http_error(response)
+                        if response.status_code >= 500 and attempt < retries:
+                            last_error = error
+                            time.sleep(1.0 * (attempt + 1))
+                            continue
+                        raise error
+                    for line in response.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_line = line[5:].strip()
+                        if data_line == "[DONE]":
+                            return
+                        try:
+                            chunk = json.loads(data_line)
+                            choices = chunk["choices"]
+                            if finished and choices == [] and "usage" in chunk:
+                                continue
+                            choice = choices[0]
+                            delta = choice["delta"]
+                            finish_reason = choice.get("finish_reason")
+                            if finish_reason is not None:
+                                finished = True
+                            # OpenAI 兼容服务会用空 delta + finish_reason 标记正常结束。
+                            if not delta and finish_reason is None:
+                                raise AIRequestError("模型流响应格式错误")
+                            content = delta.get("content")
+                        except AIRequestError:
+                            raise
+                        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                            raise AIRequestError("模型流响应格式错误") from None
+                        if content is None:
+                            continue
+                        if not isinstance(content, str):
+                            raise AIRequestError("模型流响应格式错误")
+                        yielded = True
+                        yield content
+                return
+            except AIRequestError:
+                raise
+            except Exception as error:  # noqa: BLE001 - network failures are redacted
+                last_error = error
+                if yielded:
+                    raise AIRequestError("模型流调用连续失败: 网络或响应格式错误") from error
+                if attempt < retries:
+                    time.sleep(1.0 * (attempt + 1))
+        raise AIRequestError("模型流调用连续失败: 网络或响应格式错误") from last_error
     def close(self) -> None:
         self._client.close()
-
 
 def build_openai_compatible(config: AIConfig) -> "OpenAICompatibleNarrator":
     """构造 openai_compatible 叙述器(并注册为 NARRATOR_REGISTRY 工厂)。"""
     return OpenAICompatibleNarrator(config)
-
 
 class OpenAICompatibleNarrator:
     """openai_compatible 提供方的复盘叙述实现。"""
@@ -198,6 +285,8 @@ class OpenAICompatibleNarrator:
 
 # 已实现的叙述器。空 dict 之前是有意的闸门;接入 openai_compatible 后,
 # 任何未注册的 provider 仍会在 build_narrator 处明确报错。
+
+
 NARRATOR_REGISTRY: Dict[str, Callable[["AIConfig"], "ReviewNarrator"]] = {
     "openai_compatible": build_openai_compatible,
 }
@@ -220,6 +309,7 @@ def load_ai_config(settings: dict) -> AIConfig:
 
     temperature = 0.2
     max_tokens = 2000
+    reasoning_effort = str(raw.get("reasoning_effort") or "").strip() or None
     if raw.get("temperature") is not None:
         temperature = float(raw["temperature"])
     if raw.get("max_tokens") is not None:
@@ -233,6 +323,7 @@ def load_ai_config(settings: dict) -> AIConfig:
         api_key_env=api_key_env,
         temperature=temperature,
         max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
     )
 
 

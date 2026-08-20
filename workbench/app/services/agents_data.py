@@ -17,12 +17,35 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import copy
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from engine.db import Store
+from app.schemas.pi_agent import compute_candidate_hash, compute_input_hash
+
+
+@dataclass(frozen=True)
+class FrozenAgentInput:
+    """一次研判使用的候选和完整快照。
+
+    数据在构造时全部读取完毕；后续 Pi 调用只消费这里的内存副本，不重新查询
+    DuckDB。列表保留 JSON 数组形状，哈希记录本次冻结输入的审计指纹。
+    """
+
+    as_of: str
+    scan_run_id: str
+    candidates: list[dict[str, Any]]
+    snapshots: list[dict[str, Any]]
+    candidate_hash: str
+    input_hash: str
+
+    @property
+    def snapshot_by_code(self) -> dict[str, dict[str, Any]]:
+        return {str(item["ts_code"]): item for item in self.snapshots}
 
 
 class AgentDataMixin:
@@ -49,6 +72,123 @@ class AgentDataMixin:
                 history = pd.DataFrame()
             pool.append(self._compact_row(row, history))
         return pool
+
+    def freeze_agent_input(
+        self,
+        candidates_n: int,
+        ts_codes: Optional[list[str]],
+        as_of: str,
+        *,
+        run_id: str | None = None,
+        strategy: str | None = None,
+    ) -> FrozenAgentInput:
+        """冻结 Pi 输入;显式 run_id 时只读取并校验该批次。"""
+        ensure_visible = getattr(self, "_ensure_visible_as_of", None)
+        if callable(ensure_visible):
+            as_of = ensure_visible(str(as_of))
+        if isinstance(candidates_n, bool) or not isinstance(candidates_n, int):
+            raise ValueError("candidates_n 必须是整数")
+        if candidates_n < 1 or candidates_n > 20:
+            raise ValueError("candidates_n 必须在 1~20 之间")
+        if not str(as_of).strip():
+            raise ValueError("as_of 不能为空")
+
+        if run_id is not None:
+            exact_reader = getattr(self.repository, "scan_batch", None)
+            if exact_reader is None:
+                exact_reader = getattr(self.repository, "scan_rows_exact", None)
+            if exact_reader is None:
+                raise RuntimeError("扫描仓储不支持精确批次读取")
+            scan_run, frame = exact_reader(run_id, as_of=as_of, strategy=strategy)
+        else:
+            scan_run, frame = self.repository.latest_scan_rows()
+            if str(scan_run.get("as_of")) != str(as_of):
+                raise RuntimeError(
+                    f"扫描批次 {scan_run.get('run_id')} 日期不匹配: 期望 {as_of}, 实际 {scan_run.get('as_of')}"
+                )
+            if strategy is not None and str(scan_run.get("strategy")) != str(strategy):
+                raise RuntimeError(
+                    f"扫描批次 {scan_run.get('run_id')} 策略不匹配: 期望 {strategy}, 实际 {scan_run.get('strategy')}"
+                )
+        if run_id is not None and str(scan_run.get("run_id") or "") != str(run_id):
+            raise RuntimeError(
+                f"扫描批次身份不匹配: 期望 {run_id}, 实际 {scan_run.get('run_id')}"
+            )
+        if str(scan_run.get("as_of")) != str(as_of):
+            raise RuntimeError("扫描批次日期不匹配")
+        if str(scan_run.get("status") or "").lower() == "failed":
+            raise RuntimeError(f"扫描批次 {scan_run.get('run_id')} 已失败")
+        if frame is None or frame.empty:
+            raise RuntimeError("扫描候选池为空,无法冻结 Agent 输入")
+        data = frame
+        if ts_codes:
+            wanted = {
+                str(code).strip().upper()
+                for code in ts_codes
+                if str(code).strip()
+            }
+            available = {
+                str(code).strip().upper()
+                for code in data.get("ts_code", pd.Series(dtype=str)).tolist()
+            }
+            missing = sorted(wanted - available)
+            if missing:
+                raise RuntimeError(f"请求股票不在扫描候选池: {','.join(missing)}")
+            data = data[data["ts_code"].astype(str).str.upper().isin(wanted)]
+        data = data.head(candidates_n)
+        if data.empty:
+            raise RuntimeError("没有可冻结的扫描候选")
+
+        candidates: list[dict[str, Any]] = []
+        snapshots: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for _, row in data.iterrows():
+            code = str(row.get("ts_code") or "").strip().upper()
+            if not code:
+                raise RuntimeError("扫描候选缺少 ts_code")
+            if code in seen:
+                raise RuntimeError(f"扫描候选存在重复股票: {code}")
+            seen.add(code)
+
+            # 粗筛数据也必须来自冻结时点；异常和空结果都不能静默跳过。
+            history = self.repository.history(code, as_of, 150)
+            if history is None or history.empty:
+                raise RuntimeError(f"冻结候选 {code} 缺少 Agent 粗筛所需历史行情")
+            compact = self._compact_row(row, history.tail(40))
+            total = _json_number(row.get("total"))
+            if total is None:
+                raise RuntimeError(f"冻结候选 {code} 缺少有效规则评分")
+            candidate = {
+                **compact,
+                "rank": int(row["rank"]) if "rank" in row and pd.notna(row["rank"]) else len(candidates) + 1,
+                "total": total,
+                "score": total,
+            }
+            candidates.append(candidate)
+
+            try:
+                snapshot = self._load_snapshot(code, as_of)
+            except Exception:
+                raise
+            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("stock"), dict):
+                raise RuntimeError(f"完整快照 {code} 无效")
+            stock = snapshot["stock"]
+            snapshot_code = str(stock.get("ts_code") or "").strip().upper()
+            if snapshot_code != code:
+                raise RuntimeError(f"完整快照 {code} 股票归属不一致")
+            snapshot = {"ts_code": code, **snapshot}
+            snapshots.append(snapshot)
+
+        frozen_candidates = copy.deepcopy(candidates)
+        frozen_snapshots = copy.deepcopy(snapshots)
+        return FrozenAgentInput(
+            as_of=str(as_of),
+            scan_run_id=str(scan_run.get("run_id") or ""),
+            candidates=frozen_candidates,
+            snapshots=frozen_snapshots,
+            candidate_hash=compute_candidate_hash(frozen_candidates),
+            input_hash=compute_input_hash(frozen_candidates, frozen_snapshots),
+        )
 
     @staticmethod
     def _compact_row(row: pd.Series, history: pd.DataFrame) -> dict:
@@ -325,3 +465,16 @@ def _round(value: float, digits: int = 2):
     if num != num:
         return None
     return round(num, digits)
+
+
+def _json_number(value: Any) -> float | int | None:
+    """将 pandas 数值转成严格 JSON 数字；缺失值保持 None，不填零。"""
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(number):
+        return None
+    return number

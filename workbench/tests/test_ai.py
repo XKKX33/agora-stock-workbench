@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+import builtins
 import json
+import runpy
 import sys
+import types
 from pathlib import Path
 
 import httpx
@@ -22,6 +25,7 @@ from engine.ai import (  # noqa: E402
     NARRATOR_REGISTRY,
     AIConfig,
     AIConfigError,
+    AIRequestError,
     AIUnavailableError,
     OpenAICompatibleClient,
     build_narrator,
@@ -29,6 +33,7 @@ from engine.ai import (  # noqa: E402
     load_ai_config,
     narrate_review,
 )
+import engine.config as config_module  # noqa: E402
 from engine.config import load_settings  # noqa: E402
 import app.services.ai as ai_service_module  # noqa: E402
 
@@ -47,6 +52,65 @@ def clean_registry():
 
 
 # ---------------------------------------------------------------- 配置解析
+
+
+def test_workspace_env_loader_reads_dotenv_without_overriding_process_env(
+    tmp_path, monkeypatch
+):
+    assert hasattr(config_module, "load_workspace_env")
+    env_name = "WORKBENCH_DOTENV_TEST"
+    (tmp_path / ".env").write_text(f"{env_name}=from-file\n", encoding="utf-8")
+    monkeypatch.setattr(config_module, "WORKBENCH_ROOT", tmp_path)
+    monkeypatch.delenv(env_name, raising=False)
+
+    config_module.load_workspace_env()
+    assert config_module.os.environ[env_name] == "from-file"
+
+    monkeypatch.setenv(env_name, "from-process")
+    config_module.load_workspace_env()
+    assert config_module.os.environ[env_name] == "from-process"
+
+
+def test_runtime_dependencies_include_python_dotenv():
+    requirements = (
+        Path(__file__).resolve().parents[1] / "requirements.txt"
+    ).read_text(encoding="utf-8")
+    declared = [
+        line.split("#", 1)[0].strip().lower()
+        for line in requirements.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    assert any(line.startswith("python-dotenv") for line in declared)
+
+
+def test_serve_loads_workspace_env_before_app_config_import(monkeypatch):
+    env_name = "WORKBENCH_SERVE_ENV_ORDER_TEST"
+    observed = []
+    monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(
+        config_module,
+        "load_workspace_env",
+        lambda: monkeypatch.setenv(env_name, "loaded"),
+    )
+    fake_app_config = types.ModuleType("app.config")
+    fake_app_config.AppSettings = type("AppSettings", (), {})
+    real_import = builtins.__import__
+
+    def import_with_observation(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "app.config":
+            observed.append(config_module.os.environ.get(env_name))
+            return fake_app_config
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_with_observation)
+
+    runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "serve.py"),
+        run_name="serve_env_test",
+    )
+
+    assert observed == ["loaded"]
 
 
 def test_missing_ai_section_is_disabled_not_error():
@@ -74,18 +138,19 @@ def test_api_key_env_defaults():
     assert config.api_key_env == "WORKBENCH_AI_API_KEY"
 
 
-def test_default_settings_enable_deepseek_without_storing_secret():
+def test_default_settings_use_supplied_provider_without_storing_secret():
     settings = load_settings()
 
-    assert settings["ai"] == {
-        "enabled": True,
-        "provider": "openai_compatible",
-        "base_url": "https://api.pie-xian.com/v1",
-        "api_key_env": "WORKBENCH_AI_API_KEY",
-        "model": "deepseekv4flash",
-    }
-    assert settings["agent"]["enabled"] is True
+    assert settings["ai"]["base_url"] == "https://api.pie-xian.com/v1"
+    assert settings["ai"]["model"] == "minimax-m3"
+    assert settings["ai"]["api_key_env"] == "WORKBENCH_AI_API_KEY"
     assert "api_key" not in settings["ai"]
+    assert settings["agent"]["base_url"] == "https://api.pie-xian.com/v1"
+    assert settings["agent"]["api_key_env"] == "WORKBENCH_AI_API_KEY"
+    assert settings["agent"]["enabled"] is True
+    assert settings["agent"]["reasoning_effort"] == "low"
+    assert settings["agent"]["max_tokens"] == 1200
+    assert "api_key" not in settings["agent"]
 
 
 def test_ai_service_uses_local_settings(monkeypatch):
@@ -175,7 +240,7 @@ def test_openai_client_uses_deepseek_request_contract(monkeypatch):
         AIConfig(
             enabled=True,
             provider="openai_compatible",
-            model="deepseekv4flash",
+            model="deepseek-v4-flash",
             base_url="https://api.pie-xian.com/v1",
             api_key_env=ENV_KEY,
         ),
@@ -189,9 +254,279 @@ def test_openai_client_uses_deepseek_request_contract(monkeypatch):
 
     assert seen == {
         "url": "https://api.pie-xian.com/v1/chat/completions",
-        "model": "deepseekv4flash",
+        "model": "deepseek-v4-flash",
         "authorized": True,
     }
+
+
+def test_openai_client_sends_configured_reasoning_effort(monkeypatch):
+    seen = {}
+
+    def capture_ok(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{}"}}]},
+        )
+
+    monkeypatch.setenv(ENV_KEY, "fake-api-key")
+    client = OpenAICompatibleClient(
+        AIConfig(
+            enabled=True,
+            provider="openai_compatible",
+            model="grok-4.5",
+            base_url="https://grok.xuan.christmas/v1",
+            api_key_env=ENV_KEY,
+            reasoning_effort="low",
+        ),
+        transport=httpx.MockTransport(capture_ok),
+    )
+    try:
+        assert client.chat([], json_mode=True) == "{}"
+    finally:
+        client.close()
+
+    assert seen["reasoning_effort"] == "low"
+
+def test_chat_stream_yields_text_deltas_and_ignores_done(monkeypatch):
+    monkeypatch.setenv(ENV_KEY, "stream-test-secret")
+
+    def stream_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":" world"}}]}\n\n'
+                'data: [DONE]\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatibleClient(
+        AIConfig(enabled=True, provider="openai_compatible", model="m", base_url="https://grok.xuan.christmas/", api_key_env=ENV_KEY),
+        transport=httpx.MockTransport(stream_response),
+    )
+    try:
+        assert list(client.chat_stream([{"role": "user", "content": "ping"}], retries=0)) == ["hello", " world"]
+    finally:
+        client.close()
+
+
+def test_chat_stream_does_not_retry_after_yielded_delta(monkeypatch):
+    calls = 0
+
+    class DeltaThenFailure(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+            raise RuntimeError("transport failed")
+
+    def stream_response(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            stream=DeltaThenFailure(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr("engine.ai.time.sleep", lambda _seconds: None)
+    client = OpenAICompatibleClient(
+        AIConfig(enabled=True, provider="openai_compatible", model="m", base_url="https://grok.xuan.christmas/"),
+        transport=httpx.MockTransport(stream_response),
+    )
+    chunks = []
+    try:
+        with pytest.raises(AIRequestError, match="模型流调用连续失败"):
+            for chunk in client.chat_stream([], retries=1):
+                chunks.append(chunk)
+    finally:
+        client.close()
+
+    assert chunks == ["hello"]
+    assert calls == 1
+
+def test_chat_stream_rejects_malformed_delta():
+    def malformed(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text='data: {"choices":[]}\n\n')
+
+    client = OpenAICompatibleClient(
+        AIConfig(enabled=True, provider="openai_compatible", model="m", base_url="https://grok.xuan.christmas/"),
+        transport=httpx.MockTransport(malformed),
+    )
+    try:
+        with pytest.raises(AIRequestError, match="流响应格式错误"):
+            list(client.chat_stream([], retries=0))
+    finally:
+        client.close()
+
+
+def test_chat_stream_error_does_not_expose_key_or_body(monkeypatch):
+    secret = "stream-secret-value"
+    monkeypatch.setenv(ENV_KEY, secret)
+
+    def failure(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text=f"provider leaked {secret}")
+
+    client = OpenAICompatibleClient(
+        AIConfig(enabled=True, provider="openai_compatible", model="m", base_url="https://grok.xuan.christmas/", api_key_env=ENV_KEY),
+        transport=httpx.MockTransport(failure),
+    )
+    try:
+        with pytest.raises(AIRequestError) as captured:
+            list(client.chat_stream([], retries=0))
+    finally:
+        client.close()
+    assert secret not in str(captured.value)
+def test_chat_stream_rejects_empty_non_terminal_delta():
+    def malformed(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{}}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatibleClient(
+        AIConfig(enabled=True, provider="openai_compatible", model="m", base_url="https://grok.xuan.christmas/"),
+        transport=httpx.MockTransport(malformed),
+    )
+    try:
+        with pytest.raises(AIRequestError, match="流响应格式错误"):
+            list(client.chat_stream([], retries=0))
+    finally:
+        client.close()
+
+
+def test_chat_stream_accepts_terminal_empty_delta():
+    def terminal(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"choices":[{"delta":{"content":"{}"},"finish_reason":null}]}'
+                "\n\n"
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+                "\n\n"
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatibleClient(
+        AIConfig(enabled=True, provider="openai_compatible", model="m", base_url="https://grok.xuan.christmas/"),
+        transport=httpx.MockTransport(terminal),
+    )
+    try:
+        assert list(client.chat_stream([], retries=0)) == ["{}"]
+    finally:
+        client.close()
+
+
+def test_chat_stream_accepts_usage_chunk_after_finish():
+    def terminal_usage(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"choices":[{"delta":{"content":"{}"}}]}'
+                "\n\n"
+                'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop"}]}'
+                "\n\n"
+                'data: {"choices":[],"usage":{"completion_tokens":10}}'
+                "\n\n"
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatibleClient(
+        AIConfig(enabled=True, provider="openai_compatible", model="m", base_url="https://api.pie-xian.com/v1"),
+        transport=httpx.MockTransport(terminal_usage),
+    )
+    try:
+        assert list(client.chat_stream([], retries=0)) == ["{}"]
+    finally:
+        client.close()
+
+
+
+def test_configured_default_endpoint_is_grok():
+    settings = load_settings()
+    assert settings["ai"]["base_url"] == "https://api.pie-xian.com/v1"
+    assert settings["agent"]["base_url"] == "https://api.pie-xian.com/v1"
+    assert settings["ai"]["model"] == "minimax-m3"
+
+
+def test_openai_http_error_never_exposes_provider_response_body(monkeypatch):
+    sentinel = "Bearer AUDIT_SECRET_SENTINEL"
+
+    def echo_secret(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "sk-provider-token-123",
+                    "message": f"请求头包含 {sentinel}",
+                }
+            },
+        )
+
+    monkeypatch.setenv(ENV_KEY, "fake-api-key")
+    client = OpenAICompatibleClient(
+        AIConfig(
+            enabled=True,
+            provider="openai_compatible",
+            model="deepseek-v4-flash",
+            base_url="https://api.pie-xian.com/v1",
+            api_key_env=ENV_KEY,
+        ),
+        transport=httpx.MockTransport(echo_secret),
+    )
+
+    try:
+        with pytest.raises(AIRequestError) as captured:
+            client.chat([{"role": "user", "content": "ping"}], retries=0)
+    finally:
+        client.close()
+
+    message = str(captured.value)
+    assert "HTTP 400" in message
+    assert "sk-provider-token-123" not in message
+    assert sentinel not in message
+    assert "AUDIT_SECRET_SENTINEL" not in message
+
+
+def test_openai_client_retries_server_errors(monkeypatch):
+    calls = 0
+
+    def recover_on_third_call(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(
+                503,
+                json={"error": {"code": "temporarily_unavailable"}},
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    monkeypatch.setenv(ENV_KEY, "fake-api-key")
+    monkeypatch.setattr("engine.ai.time.sleep", lambda _seconds: None)
+    client = OpenAICompatibleClient(
+        AIConfig(
+            enabled=True,
+            provider="openai_compatible",
+            model="deepseek-v4-flash",
+            base_url="https://api.pie-xian.com/v1",
+            api_key_env=ENV_KEY,
+        ),
+        transport=httpx.MockTransport(recover_on_third_call),
+    )
+
+    try:
+        assert client.chat([{"role": "user", "content": "ping"}], retries=2) == "ok"
+    finally:
+        client.close()
+    assert calls == 3
 
 
 def test_narrate_without_config_raises_not_fake_text(monkeypatch):

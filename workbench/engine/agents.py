@@ -32,6 +32,7 @@ from engine.ai import (
     load_ai_config,
 )
 from engine.config import load_settings
+from engine.methodology import METHODOLOGY
 
 # ------------------------------------------------------------------ 配置
 
@@ -58,12 +59,13 @@ class AgentConfig:
     api_key_env: str = "WORKBENCH_AI_API_KEY"
     temperature: float = 0.2
     max_tokens: int = 4000
-    default_candidates: int = 200
-    default_depth: int = 8
+    reasoning_effort: Optional[str] = None
+    default_candidates: int = 20
+    default_depth: int = 20
     default_final: int = 3
-    max_candidates: int = 200
-    max_depth: int = 30
-    max_final: int = 10
+    max_candidates: int = 20
+    max_depth: int = 20
+    max_final: int = 3
 
     def clamp(self, candidates: int, depth: int, final_count: int) -> tuple[int, int, int]:
         """把面板参数钳制进合法区间。面板数字可以乱填,后端必须兜住。"""
@@ -82,6 +84,7 @@ class AgentConfig:
             api_key_env=self.api_key_env or ai.api_key_env,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            reasoning_effort=self.reasoning_effort,
         )
 
 
@@ -108,12 +111,13 @@ def load_agent_config(settings: Optional[dict] = None) -> AgentConfig:
         or "WORKBENCH_AI_API_KEY",
         temperature=float(raw.get("temperature", 0.2)),
         max_tokens=_int("max_tokens", 4000),
-        default_candidates=_int("default_candidates", 200),
-        default_depth=_int("default_depth", 8),
+        reasoning_effort=str(raw.get("reasoning_effort") or "").strip() or None,
+        default_candidates=_int("default_candidates", 20),
+        default_depth=_int("default_depth", 20),
         default_final=_int("default_final", 3),
-        max_candidates=_int("max_candidates", 200),
-        max_depth=_int("max_depth", 30),
-        max_final=_int("max_final", 10),
+        max_candidates=_int("max_candidates", 20),
+        max_depth=_int("max_depth", 20),
+        max_final=_int("max_final", 3),
     )
 
 
@@ -137,15 +141,7 @@ def status(config: AgentConfig, ai: AIConfig) -> dict:
 
 # ------------------------------------------------------------------ 提示词
 
-METHODOLOGY = """短线研判方法论(优先级从高到低):
-1. 情绪周期:判断个股与所属板块处于 冰点修复/启动/发酵/加速/高潮/分歧/退潮 哪个阶段,二者是否共振;
-   情绪启动+结构初期最有短线弹性,高潮末端、退潮反抽一律降级。
-2. 波浪结构:周线定大势、日线定节奏;浪型不清就说"不适合强行数浪",不要教条。
-3. MACD 动能:金叉/死叉、零轴上下、红绿柱扩张收缩、是否背离。
-4. 量价验证:突破/回调是否放量有效;缩量上涨、放量滞涨都要指出。
-5. 资金确认:资金流只做确认与降级,不做总指挥。
-短线口径:看未来 1~5 个交易日的弹性与爆发力,淡化长线基本面。
-纪律:只能依据输入数据判断,输入没有的信息一律视为未知,不得编造。"""
+# 方法论正文的唯一来源是 engine.methodology,Pi Agent 也从那里取,避免两处各自维护。
 
 _SYSTEM_COARSE = f"""你是 A 股短线选股总分析师。任务:从候选池中按短线潜力选出最值得深挖的 K 只。
 {METHODOLOGY}
@@ -253,6 +249,116 @@ def _text(value: Any, default: str = "") -> str:
 
 ProgressFn = Callable[[str, int, int, str], None]
 
+@dataclass(frozen=True)
+class DebateMessage:
+    role: str
+    stage: str
+    round_no: int
+    content: dict
+    citations: list = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {"role": self.role, "stage": self.stage, "round_no": self.round_no, "content": self.content, "citations": self.citations}
+
+
+PUBLIC_ROLES = ("methodology", "sentiment", "trend", "bull", "bear", "bull_counter", "risk_chair")
+_ANALYST_ROLES = {"methodology", "sentiment", "trend"}
+
+
+def _public_content(role: str, parsed: dict) -> tuple[dict, list]:
+    if not isinstance(parsed, dict) or not parsed:
+        raise AgentOutputError(f"公开角色 {role} 必须返回非空 JSON 对象")
+    citations = parsed.get("citations", [])
+    if not isinstance(citations, list):
+        raise AgentOutputError(f"公开角色 {role} 的 citations 必须是列表")
+    if role in _ANALYST_ROLES:
+        for key in ("score", "stance", "points", "risks"):
+            if key not in parsed:
+                raise AgentOutputError(f"公开角色 {role} 缺少字段 {key}")
+        _score(parsed["score"], f"公开角色 {role} 的 score")
+        if parsed["stance"] not in ("bullish", "neutral", "bearish"):
+            raise AgentOutputError(f"公开角色 {role} 的 stance 无效")
+        if not isinstance(parsed["points"], list) or not isinstance(parsed["risks"], list):
+            raise AgentOutputError(f"公开角色 {role} 的 points/risks 必须是列表")
+    elif role in ("bull", "bear", "bull_counter"):
+        if not any(key in parsed for key in ("summary", "argument", "bull", "bear")):
+            raise AgentOutputError(f"公开角色 {role} 缺少公开论点")
+    elif role == "risk_chair":
+        for key in ("verdict", "score", "thesis", "risks", "action"):
+            if key not in parsed:
+                raise AgentOutputError(f"公开角色 risk_chair 缺少字段 {key}")
+        if parsed["verdict"] not in ("看多", "中性", "看空"):
+            raise AgentOutputError("公开角色 risk_chair 的 verdict 无效")
+        _score(parsed["score"], "公开角色 risk_chair 的 score")
+        if not isinstance(parsed["risks"], list):
+            raise AgentOutputError("公开角色 risk_chair 的 risks 必须是列表")
+        if not isinstance(parsed["thesis"], str) or not isinstance(parsed["action"], str):
+            raise AgentOutputError("公开角色 risk_chair 的 thesis/action 必须是字符串")
+    return parsed, citations
+
+
+def run_public_debate(client: OpenAICompatibleClient, config: AgentConfig, *, snapshot: dict, deep: dict, emit: Optional[ProgressFn] = None, publish: Optional[Callable[[dict], dict]] = None) -> dict:
+    """Run the fixed public transcript; debate roles must use provider streaming."""
+    transcript: list[dict] = []
+    event_seq: list[int] = []
+
+    def _publish(event_type: str, message: DebateMessage, content: Any, status: str) -> None:
+        if publish is None:
+            return
+        event = {"event_type": event_type, "ts_code": snapshot.get("stock", {}).get("ts_code"), "stage": message.stage, "role": message.role, "round_no": message.round_no, "content": content, "citations": message.citations, "status": status}
+        saved = publish(event)
+        if event_type == "message.completed" and isinstance(saved, dict) and saved.get("seq") is not None:
+            event_seq.append(int(saved["seq"]))
+
+    payload = json.dumps({"stock": snapshot.get("stock", {}), "snapshot": snapshot, "deep": deep}, ensure_ascii=False, default=str)
+    analyst_systems = {"methodology": _SYSTEM_DEEP_METHODOLOGY, "sentiment": _SYSTEM_DEEP_SENTIMENT, "trend": _SYSTEM_DEEP_TREND}
+    for round_no, role in enumerate(("methodology", "sentiment", "trend"), start=1):
+        try:
+            raw = client.chat(
+                [{"role": "system", "content": analyst_systems[role]}, {"role": "user", "content": f"股票快照:\n{payload}"}],
+                json_mode=True,
+            )
+            parsed = parse_json_response(raw)
+        except AgentOutputError:
+            raise
+        except Exception as exc:
+            raise AgentOutputError(f"公开角色 {role} 调用失败") from exc
+        content, citations = _public_content(role, parsed)
+        message = DebateMessage(role, "analysis", round_no, content, citations)
+        transcript.append(message.as_dict())
+        _publish("message.completed", message, content, "completed")
+    if not callable(getattr(client, "chat_stream", None)):
+        raise AgentOutputError("辩论路径要求提供方支持流式输出")
+    systems = {
+        "bull": "你是 bull 多头辩手。只依据公开 transcript，输出严格 JSON 对象，包含 summary 或 argument 与 citations。",
+        "bear": "你是 bear 空头辩手。必须回应公开 transcript 中的分析师与 bull 论点，只依据输入输出严格 JSON。",
+        "bull_counter": "你是 bull_counter 反驳辩手。必须回应公开 transcript 中的 bear 论点，只依据输入输出严格 JSON。",
+        "risk_chair": _SYSTEM_RISK,
+    }
+    for round_no, role in enumerate(("bull", "bear", "bull_counter", "risk_chair"), start=4):
+        transcript_json = json.dumps(transcript, ensure_ascii=False, default=str)
+        messages = [{"role": "system", "content": systems[role]}, {"role": "user", "content": f"股票快照:\n{json.dumps(snapshot, ensure_ascii=False, default=str)}\n公开 transcript:\n{transcript_json}\n你的角色: {role}。输出严格 JSON 对象，不要额外文字。"}]
+        partial = DebateMessage(role, "debate", round_no, {}, [])
+        chunks: list[str] = []
+        try:
+            for delta in client.chat_stream(messages, json_mode=True):
+                if not isinstance(delta, str):
+                    raise AgentOutputError(f"公开角色 {role} 返回了非文本流片段")
+                chunks.append(delta)
+                _publish("message.delta", partial, {"delta": delta}, "streaming")
+                _progress(emit, "debate", round_no - 3, 4, f"公开辩论 {role}")
+        except AgentOutputError:
+            raise
+        except (AttributeError, NotImplementedError) as exc:
+            raise AgentOutputError("辩论路径要求提供方支持流式输出") from exc
+        parsed = parse_json_response("".join(chunks))
+        content, citations = _public_content(role, parsed)
+        completed = DebateMessage(role, "debate", round_no, content, citations)
+        transcript.append(completed.as_dict())
+        _publish("message.completed", completed, content, "completed")
+    risk = transcript[-1]["content"]
+    return {"messages": transcript, "public_debate": transcript, "event_seq": event_seq, "final": risk}
+
 
 def _progress(on: Optional[ProgressFn], stage: str, step: int, total: int, message: str) -> None:
     if on:
@@ -332,298 +438,116 @@ def _analyze_one(
     }
 
 
-def _debate_one(
-    client: OpenAICompatibleClient,
-    config: AgentConfig,
-    snapshot: dict,
-    deep: dict,
-) -> dict:
-    """一只最终股:多空辩论一回合 + 中性风控定稿。"""
-    debate_payload = {
-        "stock": snapshot["stock"],
-        "analysts": deep.get("analysts", {}),
-        "deep_score": deep.get("score"),
-        "deep_points": deep.get("points", []),
-        "deep_risks": deep.get("risks", []),
-    }
-    payload = json.dumps(debate_payload, ensure_ascii=False, default=str)
-
-    raw_debate = client.chat(
-        [
-            {"role": "system", "content": _SYSTEM_DEBATE},
-            {"role": "user", "content": f"三位分析师观点:\n{payload}"},
-        ],
-        json_mode=True,
-    )
-    debate = parse_json_response(raw_debate)
-
-    raw_final = client.chat(
-        [
-            {"role": "system", "content": _SYSTEM_RISK},
-            {"role": "user", "content": f"多空辩论:\n{json.dumps(debate, ensure_ascii=False, default=str)}\n\n三位分析师观点:\n{payload}"},
-        ],
-        json_mode=True,
-    )
-    final = parse_json_response(raw_final)
-
+def _debate_one(client: OpenAICompatibleClient, config: AgentConfig, snapshot: dict, deep: dict) -> dict:
+    payload = json.dumps({"stock": snapshot["stock"], "analysts": deep.get("analysts", {}), "deep_score": deep.get("score"), "deep_points": deep.get("points", []), "deep_risks": deep.get("risks", [])}, ensure_ascii=False, default=str)
+    debate = parse_json_response(client.chat([{"role": "system", "content": _SYSTEM_DEBATE}, {"role": "user", "content": f"三位分析师观点:\n{payload}"}], json_mode=True))
+    final = parse_json_response(client.chat([{"role": "system", "content": _SYSTEM_RISK}, {"role": "user", "content": f"多空辩论:\n{json.dumps(debate, ensure_ascii=False)}\n三位分析师观点:\n{payload}"}], json_mode=True))
     score = _score(final.get("score"), "最终决策人的 score")
     verdict = _text(final.get("verdict"), "中性")
     if verdict not in ("看多", "中性", "看空"):
         verdict = "中性"
-    thesis = _text(final.get("thesis"), "暂无核心逻辑")
-    action = _text(final.get("action"))
     risks = final.get("risks") or []
     if not isinstance(risks, list):
         risks = []
-    return {
-        "ts_code": deep["ts_code"],
-        "name": deep["name"],
-        "industry": deep["industry"],
-        "score": score,
-        "stance": "bullish" if verdict == "看多" else ("bearish" if verdict == "看空" else "neutral"),
-        "verdict": verdict,
-        "thesis": thesis,
-        "action": action,
-        "risks": risks,
-        "debate": {"bull": _text(debate.get("bull")), "bear": _text(debate.get("bear"))},
-        "deep": deep,
-    }
+    return {"ts_code": deep["ts_code"], "name": deep["name"], "industry": deep["industry"], "score": score, "stance": "bullish" if verdict == "看多" else ("bearish" if verdict == "看空" else "neutral"), "verdict": verdict, "thesis": _text(final.get("thesis"), "暂无核心逻辑"), "action": _text(final.get("action")), "risks": risks, "debate": {"bull": _text(debate.get("bull")), "bear": _text(debate.get("bear"))}, "deep": deep}
 
 
-def coarse_screen(
-    client: OpenAICompatibleClient,
-    config: AgentConfig,
-    candidates: list[dict],
-    depth: int,
-    on_progress: Optional[ProgressFn] = None,
-) -> list[dict]:
-    """阶段一:单次调用,把候选池压缩成 depth 只。"""
+def coarse_screen(client: OpenAICompatibleClient, config: AgentConfig, candidates: list[dict], depth: int, on_progress: Optional[ProgressFn] = None) -> list[dict]:
     _progress(on_progress, "coarse", 0, 1, f"粗筛:共 {len(candidates)} 只候选")
-    rows = []
-    for index, item in enumerate(candidates, start=1):
-        rows.append(
-            "{index}. {ts_code} {name} {industry} | 收盘 {close} 涨跌 {pct}% | "
-            "5日 {r5}% 20日 {r20}% | 量比 {vr} | MACD {macd} | 资金 {mf}".format(
-                index=index,
-                ts_code=item.get("ts_code", ""),
-                name=item.get("name", ""),
-                industry=item.get("industry", ""),
-                close=item.get("close", ""),
-                pct=item.get("pct_chg", ""),
-                r5=item.get("pct_5d", ""),
-                r20=item.get("pct_20d", ""),
-                vr=item.get("volume_ratio", ""),
-                macd=item.get("macd_state", ""),
-                mf=item.get("money_class", ""),
-            )
-        )
-    raw = client.chat(
-        [
-            {"role": "system", "content": _SYSTEM_COARSE},
-            {"role": "user", "content": f"候选池({len(rows)} 只),选出 {depth} 只:\n" + "\n".join(rows)},
-        ],
-        json_mode=True,
-    )
-    data = parse_json_response(raw)
+    rows = ["{index}. {ts_code} {name} {industry} | 收盘 {close} 涨跌 {pct}% | 5日 {r5}% 20日 {r20}% | 量比 {vr} | MACD {macd} | 资金 {mf}".format(index=i, ts_code=x.get("ts_code", ""), name=x.get("name", ""), industry=x.get("industry", ""), close=x.get("close", ""), pct=x.get("pct_chg", ""), r5=x.get("pct_5d", ""), r20=x.get("pct_20d", ""), vr=x.get("volume_ratio", ""), macd=x.get("macd_state", ""), mf=x.get("money_class", "")) for i, x in enumerate(candidates, 1)]
+    data = parse_json_response(client.chat([{"role": "system", "content": _SYSTEM_COARSE}, {"role": "user", "content": f"候选池({len(rows)} 只),选出 {depth} 只:\n" + "\n".join(rows)}], json_mode=True))
     selected = data.get("selected") or []
     if not isinstance(selected, list):
         raise AgentOutputError("粗筛输出 selected 不是列表")
-    by_code = {str(item.get("ts_code", "")).strip(): item for item in candidates}
-    out: list[dict] = []
-    seen: set[str] = set()
+    by_code = {str(x.get("ts_code", "")).strip(): x for x in candidates}
+    out = []
+    seen = set()
     for entry in selected:
         if not isinstance(entry, dict):
             continue
         code = str(entry.get("ts_code") or "").strip()
         if not code or code in seen or code not in by_code:
-            continue  # 模型给了不存在的代码,忽略(不硬错,结果只含真实候选)
+            continue
         seen.add(code)
-        out.append(
-            {
-                "ts_code": code,
-                "name": by_code[code].get("name", ""),
-                "industry": by_code[code].get("industry", ""),
-                "reason": _text(entry.get("reason")),
-            }
-        )
+        x = by_code[code]
+        out.append({"ts_code": code, "name": x.get("name", ""), "industry": x.get("industry", ""), "reason": _text(entry.get("reason"))})
         if len(out) >= depth:
             break
     _progress(on_progress, "coarse", 1, 1, f"粗筛完成,进入深度学习 {len(out)} 只")
     return out
 
 
-def deep_analyze(
-    client: OpenAICompatibleClient,
-    config: AgentConfig,
-    snapshots: dict[str, dict],
-    on_progress: Optional[ProgressFn] = None,
-) -> list[dict]:
-    """阶段二:并行深度学习全部幸存股,返回按综合分降序的结果。"""
-    codes = list(snapshots.keys())
-    total = len(codes)
-    results: list[dict] = []
-    lock = threading.Lock()
-    done = 0
-
-    def _work(code: str) -> dict:
-        nonlocal done
-        snapshot = snapshots[code]
-        stock = snapshot["stock"]
-        result = _analyze_one(client, config, snapshot)
-        with lock:
-            done += 1
-            _progress(on_progress, "deep", done, total, f"深度学习 {stock.get('name', code)}")
-        return result
-
-    with ThreadPoolExecutor(max_workers=min(4, max(1, total)), thread_name_prefix="agent-deep") as pool:
-        futures = {pool.submit(_work, code): code for code in codes}
-        for future in as_completed(futures):
-            results.append(future.result())
-
+def deep_analyze(client: OpenAICompatibleClient, config: AgentConfig, snapshots: dict[str, dict], on_progress: Optional[ProgressFn] = None) -> list[dict]:
+    results = []
+    for code, snapshot in snapshots.items():
+        results.append(_analyze_one(client, config, snapshot))
+        _progress(on_progress, "deep", len(results), len(snapshots), f"深度学习 {snapshot['stock'].get('name', code)}")
     results.sort(key=lambda item: item["score"], reverse=True)
     return results
 
 
-def debate_final(
-    client: OpenAICompatibleClient,
-    config: AgentConfig,
-    snapshots: dict[str, dict],
-    deep_results: list[dict],
-    final_count: int,
-    on_progress: Optional[ProgressFn] = None,
-) -> list[dict]:
-    """阶段三:对综合分最高的 final_count 只并行辩论+风控,按最终分降序。"""
-    finalists = deep_results[:final_count]
-    total = len(finalists)
-    out: list[dict] = []
-    lock = threading.Lock()
-    done = 0
-
-    def _work(deep: dict) -> dict:
-        nonlocal done
+def debate_final(client: OpenAICompatibleClient, config: AgentConfig, snapshots: dict[str, dict], deep_results: list[dict], final_count: int, on_progress: Optional[ProgressFn] = None, publish: Optional[Callable[[dict], dict]] = None) -> list[dict]:
+    out = []
+    total = min(final_count, len(deep_results))
+    for index, deep in enumerate(deep_results[:final_count], 1):
         code = deep["ts_code"]
-        result = _debate_one(client, config, snapshots[code], deep)
-        with lock:
-            done += 1
-            _progress(on_progress, "debate", done, total, f"辩论 {deep.get('name', code)}")
-        return result
-
-    with ThreadPoolExecutor(max_workers=min(3, max(1, total)), thread_name_prefix="agent-debate") as pool:
-        futures = {pool.submit(_work, deep): deep["ts_code"] for deep in finalists}
-        for future in as_completed(futures):
-            out.append(future.result())
-
+        if callable(getattr(client, "chat_stream", None)):
+            public = run_public_debate(client, config, snapshot=snapshots[code], deep=deep, emit=on_progress, publish=publish)
+            final = public["final"]
+            verdict = _text(final.get("verdict"), "中性")
+            item = {"ts_code": code, "name": deep["name"], "industry": deep["industry"], "score": _score(final.get("score"), "最终决策人的 score"), "stance": "bullish" if verdict == "看多" else ("bearish" if verdict == "看空" else "neutral"), "verdict": verdict, "thesis": _text(final.get("thesis")), "action": _text(final.get("action")), "risks": final.get("risks") or [], "debate": {}, "deep": deep, "public_debate": public["public_debate"], "event_seq": public["event_seq"], "rank": index}
+        else:
+            item = _debate_one(client, config, snapshots[code], deep)
+            item["rank"] = index
+        out.append(item)
+        _progress(on_progress, "debate", index, total, f"辩论 {deep.get('name', code)}")
     out.sort(key=lambda item: item["score"], reverse=True)
-    for rank, item in enumerate(out, start=1):
+    for rank, item in enumerate(out, 1):
         item["rank"] = rank
     return out
-
-
-def run_single(
-    client: OpenAICompatibleClient,
-    config: AgentConfig,
-    *,
-    as_of: str,
-    snapshot: dict,
-    on_progress: Optional[ProgressFn] = None,
-) -> dict:
-    """单只股票深度研判:三位分析师 + 多空辩论 + 风控,不经过粗筛。
-
-    与 run_judge 的区别:输入只有一只股票的完整快照,跳过候选池与粗筛,
-    直接给出该股的短线结论。
-    """
+def run_single(client: OpenAICompatibleClient, config: AgentConfig, *, as_of: str, snapshot: dict, on_progress: Optional[ProgressFn] = None, publish: Optional[Callable[[dict], dict]] = None) -> dict:
     if not snapshot or not snapshot.get("stock"):
         raise AgentOutputError("单只研判快照为空,没有可研判的股票")
-
-    stock = snapshot["stock"]
-    code = stock.get("ts_code", "")
-    name = stock.get("name", code)
-    _progress(on_progress, "deep", 1, 2, f"深度学习 {name}")
+    _progress(on_progress, "deep", 1, 2, f"深度学习 {snapshot['stock'].get('name', '')}")
     deep = _analyze_one(client, config, snapshot)
-    _progress(on_progress, "deep", 2, 2, f"深度学习完成 {name}")
-
-    _progress(on_progress, "debate", 1, 1, f"多空辩论 {name}")
-    final = _debate_one(client, config, snapshot, deep)
+    _progress(on_progress, "deep", 2, 2, "深度学习完成")
+    final = debate_final(client, config, {snapshot["stock"]["ts_code"]: snapshot}, [deep], 1, on_progress, publish)[0]
     final["rank"] = 1
-
     _progress(on_progress, "done", 1, 1, "研判完成")
-    return {
-        "as_of": as_of,
-        "mode": "single",
-        "candidates_limit": 1,
-        "depth": 1,
-        "final_count": 1,
-        "coarse": [
-            {
-                "ts_code": code,
-                "name": name,
-                "industry": stock.get("industry", ""),
-                "reason": "个股研判:直接进入深度分析",
-            }
-        ],
-        "deep": [deep],
-        "final": [final],
-    }
+    return {"as_of": as_of, "mode": "single", "candidates_limit": 1, "depth": 1, "final_count": 1, "coarse": [{"ts_code": snapshot["stock"]["ts_code"], "name": snapshot["stock"].get("name", ""), "industry": snapshot["stock"].get("industry", ""), "reason": "个股研判:直接进入深度分析"}], "deep": [deep], "final": [final]}
 
 
-def run_judge(
-    client: OpenAICompatibleClient,
-    config: AgentConfig,
-    *,
-    as_of: str,
-    candidates: list[dict],
-    loader: Callable[[str], dict],
-    candidates_limit: int,
-    depth: int,
-    final_count: int,
-    on_progress: Optional[ProgressFn] = None,
-) -> dict:
-    """完整研判:粗筛 → 深度学习 → 辩论,返回批次结果。
-
-    loader(ts_code) -> snapshot:由调用方按需装配完整快照(深度学习与辩论
-    阶段才会加载,粗筛只消耗候选池的紧凑行)。
-    """
-    candidates_limit, depth, final_count = config.clamp(
-        candidates_limit, depth, final_count
-    )
+def run_judge(client: OpenAICompatibleClient, config: AgentConfig, *, as_of: str, candidates: list[dict], loader: Callable[[str], dict], candidates_limit: int, depth: int, final_count: int, on_progress: Optional[ProgressFn] = None, publish: Optional[Callable[[dict], dict]] = None) -> dict:
+    candidates_limit, depth, final_count = config.clamp(candidates_limit, depth, final_count)
     pool = candidates[:candidates_limit]
     if not pool:
         raise AgentOutputError("候选池为空,没有可研判的股票")
-
     selected = coarse_screen(client, config, pool, depth, on_progress)
     if not selected:
         raise AgentOutputError("粗筛没有选出任何股票")
-
-    snapshots: dict[str, dict] = {}
-    for item in selected:
-        snapshots[item["ts_code"]] = loader(item["ts_code"])
-
+    snapshots = {item["ts_code"]: loader(item["ts_code"]) for item in selected}
     deep_results = deep_analyze(client, config, snapshots, on_progress)
-    final = debate_final(client, config, snapshots, deep_results, final_count, on_progress)
+    final = debate_final(client, config, snapshots, deep_results, final_count, on_progress, publish)
+    return {"as_of": as_of, "candidates_limit": candidates_limit, "depth": depth, "final_count": final_count, "coarse": selected, "deep": deep_results, "final": final}
 
+
+def run_judge(client: OpenAICompatibleClient, config: AgentConfig, *, as_of: str, candidates: list[dict], loader: Callable[[str], dict], candidates_limit: int, depth: int, final_count: int, on_progress: Optional[ProgressFn] = None, publish: Optional[Callable[[dict], dict]] = None) -> dict:
+    candidates_limit, depth, final_count = config.clamp(candidates_limit, depth, final_count)
+    pool = candidates[:candidates_limit]
+    if not pool:
+        raise AgentOutputError("候选池为空,没有可研判的股票")
+    selected = coarse_screen(client, config, pool, depth, on_progress)
+    if not selected:
+        raise AgentOutputError("粗筛没有选出任何股票")
+    snapshots = {item["ts_code"]: loader(item["ts_code"]) for item in selected}
+    deep_results = deep_analyze(client, config, snapshots, on_progress)
+    final = debate_final(client, config, snapshots, deep_results, final_count, on_progress, publish)
     _progress(on_progress, "done", 1, 1, "研判完成")
-    return {
-        "as_of": as_of,
-        "candidates_limit": candidates_limit,
-        "depth": depth,
-        "final_count": final_count,
-        "coarse": selected,
-        "deep": deep_results,
-        "final": final,
-    }
+    return {"as_of": as_of, "candidates_limit": candidates_limit, "depth": depth, "final_count": final_count, "coarse": selected, "deep": deep_results, "final": final}
 
 
 __all__ = [
-    "AgentConfig",
-    "AgentConfigError",
-    "AgentOutputError",
-    "load_agent_config",
-    "status",
-    "run_judge",
-    "run_single",
-    "coarse_screen",
-    "deep_analyze",
-    "debate_final",
-    "parse_json_response",
-    "METHODOLOGY",
+    "AgentConfig", "AgentConfigError", "AgentOutputError", "DebateMessage", "PUBLIC_ROLES",
+    "load_agent_config", "status", "run_judge", "run_single", "run_public_debate",
+    "coarse_screen", "deep_analyze", "debate_final", "parse_json_response", "METHODOLOGY",
 ]

@@ -1,9 +1,17 @@
 ﻿"""多 agent 短线研判路由。"""
 
+import json
+import queue
+import time
+from collections.abc import Iterator
+
 from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.dependencies import get_agent_judge_manager
+from app.errors import WorkbenchError, safe_error_message
+from app.schemas.agent_events import AgentEventsResponse
 from app.services.agents import AgentJudgeManager
 
 router = APIRouter()
@@ -97,6 +105,129 @@ def list_judge_jobs(
     """最近研判批次列表(不含详细结论,结论用单个任务详情拉)。"""
     return {"items": manager.recent(limit=limit)}
 
+
+
+def _sse(event: dict) -> str:
+    """Encode one public event as an SSE frame."""
+    event_type = str(event.get("event_type") or "message")
+    seq = event.get("seq")
+    payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    lines = []
+    if seq is not None:
+        lines.append(f"id: {int(seq)}")
+    lines.extend((f"event: {event_type}", f"data: {payload}", ""))
+    return "\n".join(lines) + "\n"
+
+
+def _heartbeat() -> str:
+    return "event: heartbeat\ndata: {}\n\n"
+
+
+def _stream_events(manager, job_id: str, after_seq: int) -> Iterator[str]:
+    """Replay persisted events, then bridge manager bus notifications to SSE."""
+    cursor = after_seq
+    terminal = {"run.completed", "run.failed"}
+    try:
+        while True:
+            payload = manager.events(job_id, after_seq=cursor, limit=500)
+            for event in payload.get("items", []):
+                cursor = max(cursor, int(event["seq"]))
+                yield _sse(event)
+                if event.get("event_type") in terminal:
+                    return
+            task = manager.get(job_id)
+            if task.get("status") in {"succeeded", "failed"}:
+                return
+
+            bus = getattr(manager, "event_bus", None)
+            if bus is None:
+                time.sleep(1.0)
+                yield _heartbeat()
+                continue
+
+            # AgentEventBus is synchronous; bridge it to a bounded queue so
+            # heartbeats remain timely while the request waits for the next event.
+            notifications: queue.Queue = queue.Queue()
+            subscription = bus.subscribe(job_id, after_seq=cursor)
+
+            def pump() -> None:
+                try:
+                    for item in subscription:
+                        notifications.put(item)
+                except BaseException as exc:  # surfaced as a structured SSE error
+                    notifications.put(exc)
+
+            import threading
+
+            worker = threading.Thread(target=pump, daemon=True)
+            worker.start()
+            try:
+                while True:
+                    try:
+                        item = notifications.get(timeout=10.0)
+                    except queue.Empty:
+                        yield _heartbeat()
+                        task = manager.get(job_id)
+                        if task.get("status") in {"succeeded", "failed"}:
+                            return
+                        continue
+                    if item is None:
+                        yield _heartbeat()
+                        task = manager.get(job_id)
+                        if task.get("status") in {"succeeded", "failed"}:
+                            return
+                        continue
+                    if isinstance(item, BaseException):
+                        raise item
+                    if int(item.get("seq", 0)) <= cursor:
+                        continue
+                    cursor = int(item["seq"])
+                    yield _sse(item)
+                    if item.get("event_type") in terminal:
+                        return
+            finally:
+                close = getattr(bus, "close", None)
+                if close is not None:
+                    close(job_id)
+    except GeneratorExit:
+        raise
+    except Exception as exc:  # never expose provider response/body in SSE
+        error = {
+            "code": "agent_stream_failed",
+            "message": safe_error_message(exc),
+        }
+        yield _sse({"seq": cursor + 1, "event_type": "stream.error", "content": error})
+
+
+@router.get("/agents/jobs/{job_id}/events", response_model=AgentEventsResponse)
+def agent_events(
+    job_id: str,
+    after_seq: int = Query(default=0),
+    limit: int = Query(default=500),
+    manager=Depends(get_agent_judge_manager),
+) -> dict:
+    if after_seq < 0:
+        raise WorkbenchError("invalid_after_seq", "after_seq 不能为负数", status_code=400)
+    if limit < 1 or limit > 500:
+        raise WorkbenchError("invalid_limit", "limit 需在 1~500 之间", status_code=400)
+    # events() validates the persisted agent run and gives the standard 404 envelope.
+    return manager.events(job_id, after_seq=after_seq, limit=limit)
+
+
+@router.get("/agents/jobs/{job_id}/stream")
+def agent_stream(
+    job_id: str,
+    after_seq: int = Query(default=0),
+    manager=Depends(get_agent_judge_manager),
+) -> StreamingResponse:
+    if after_seq < 0:
+        raise WorkbenchError("invalid_after_seq", "after_seq 不能为负数", status_code=400)
+    manager.events(job_id, after_seq=after_seq, limit=1)
+    return StreamingResponse(
+        _stream_events(manager, job_id, after_seq),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 @router.get("/agents/jobs/{job_id}")
 def get_judge_job(job_id: str, manager=Depends(get_agent_judge_manager)) -> dict:
