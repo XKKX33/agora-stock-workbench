@@ -110,16 +110,16 @@ def run_close_pipeline(
     参数:
         db_path: 目标 DuckDB 文件。测试必须传临时库。
         strategy: 扫描策略名。
-        trade_date: 闸门判定出的目标交易日(YYYYMMDD),用于校验实际批次。
+        trade_date: 闸门判定出的目标交易日(YYYYMMDD),就是本次扫描的截面日。
         online: 是否联网更新行情。False 时跳过摄取,只跑本地闭环。
         on_step: 每步完成后的回调,用于刷心跳与落进度。回调异常会中止链条
                  (心跳写不进去说明库有问题,继续跑只会掩盖故障)。
 
     返回 PipelineResult;任一步失败直接上抛异常。
 
-    注意 trade_date 的处理:闸门用交易日历算出目标日,而在线摄取可能确认到
-    更新的交易日。此处以扫描实际写入的 as_of 为准回写到结果里,让调用方
-    把幂等键对齐到真实批次——沿用闸门的日期会让键指向一个不存在的批次。
+    trade_date 就是扫描截面:它由调用方按防前视口径算出(CLI 走
+    require_visible_as_of)。必须原样传给 run_scan——run_scan 不收 as_of 时
+    会自己取"最新交易日",那是隐藏窗口里的日期,等于绕过整条防前视闸门。
     """
     target_date = normalize_trade_date(trade_date)
     result = PipelineResult(trade_date=target_date, strategy=strategy, online=online)
@@ -171,19 +171,16 @@ def run_close_pipeline(
         )
 
     # ---------------------------------------------------- 2. 执行扫描
+    # 截面日固定为闸门目标日。在线摄取照旧把行情与日历拉到最新(数据要新),
+    # 但选股只看 target_date 及更早的数据。
     scan = run_scan(
         strategy_name=strategy,
         online=online,
         db_path=db_path,
         record=True,
+        as_of=target_date,
     )
     actual_date = scan.as_of
-    if actual_date != target_date:
-        # 不是错误:在线摄取确认到更新的交易日时,真实批次就该是它。
-        # 但必须记下来,否则调用方无法解释幂等键为什么变了。
-        logger.info(
-            "实际批次 %s 与闸门目标 %s 不一致,以实际写入为准", actual_date, target_date
-        )
     result.trade_date = actual_date
     _emit(
         StepResult(
@@ -193,7 +190,6 @@ def run_close_pipeline(
             data={
                 "run_id": scan.run_id,
                 "as_of": actual_date,
-                "gate_target_date": target_date,
                 "candidate_count": scan.candidate_count,
                 "scored_count": scan.scored_count,
                 "passed_count": scan.passed_count,
@@ -206,8 +202,9 @@ def run_close_pipeline(
     # run_scan 在 online+record 时已内部回填过一次;这里再显式跑一次是幂等的
     # (只补 retN 为空且未来收盘价已入库的记录),目的是拿到本步自己的统计数字,
     # 让"这次链条补了多少条"可查,而不是藏在扫描步里。
+    # visible_max 传截面日:隐藏窗口里的目标交易日记 future_not_visible,不回填。
     with Store(db_path, ensure_schema=True) as store:
-        backfill = backfill_returns(store, exchange)
+        backfill = backfill_returns(store, exchange, visible_max=actual_date)
     needs_attention = backfill.needs_attention()
     _emit(
         StepResult(
@@ -222,6 +219,7 @@ def run_close_pipeline(
                 "pending": backfill.pending,
                 "pending_reasons": backfill.pending_reasons,
                 "needs_attention": needs_attention,
+                "visible_max": actual_date,
             },
         )
     )
@@ -341,10 +339,20 @@ def _cli() -> None:
 
     from .config import resolve_path
     from .schedule import load_schedule_config
+    from .visibility import (
+        LookaheadBlocked,
+        ensure_visible,
+        require_visible_as_of,
+        resolve_window,
+    )
 
     parser = argparse.ArgumentParser(description="手动执行一次收盘后任务链")
     parser.add_argument("--strategy", default=None, help="策略名,默认取 schedule 配置")
-    parser.add_argument("--trade-date", default=None, help="目标交易日 YYYYMMDD,默认取日历最近开市日")
+    parser.add_argument(
+        "--trade-date",
+        default=None,
+        help="目标交易日 YYYYMMDD,默认取可见日(基准日往前退 N 个开市日)",
+    )
     parser.add_argument("--offline", action="store_true", help="离线模式,不联网摄取")
     parser.add_argument("--db", default=None, help="DuckDB 路径,默认取 settings.data.db_path")
     args = parser.parse_args()
@@ -356,14 +364,22 @@ def _cli() -> None:
     db_path = args.db or str(resolve_path(settings["data"]["db_path"]))
     strategy = args.strategy or config.strategy
 
-    trade_date = args.trade_date
-    if trade_date is None:
-        with Store(db_path, ensure_schema=False) as store:
-            end = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
-            dates = store.open_dates(config.exchange, end, 1)
-        if not dates:
-            raise SystemExit("trade_cal 无开市日记录,无法确定目标交易日;请先回补日历")
-        trade_date = dates[-1]
+    # 日期口径:默认日期只能是可见日,显式日期必须 <= 可见日。
+    # 原来取"日历最近开市日"直接落在隐藏窗口里,等于拿还没落地的行情跑链条。
+    with Store(db_path, ensure_schema=False) as store:
+        window = resolve_window(store, settings, exchange=config.exchange)
+    if args.trade_date is None:
+        try:
+            trade_date = require_visible_as_of(window)
+        except LookaheadBlocked as exc:
+            raise SystemExit(f"无法确定目标交易日:{exc}") from exc
+    else:
+        try:
+            trade_date = ensure_visible(
+                normalize_trade_date(args.trade_date), window
+            )
+        except LookaheadBlocked as exc:
+            raise SystemExit(f"拒绝执行:{exc}") from exc
 
     result = run_close_pipeline(
         db_path=db_path,

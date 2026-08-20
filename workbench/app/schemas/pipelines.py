@@ -28,6 +28,31 @@ class PipelineAccepted(BaseModel):
     gate: Optional[dict] = None
 
 
+class PipelineBackfillRequest(BaseModel):
+    """补齐最近若干个可见交易日。日期由可见窗口给出,调用方不能自己指定。"""
+
+    # 补齐天数。上限 120 是刹车:再多就该走离线脚本,不该占着 API 线程池
+    count: int = Field(default=20, ge=1, le=120)
+    strategy: Optional[str] = None
+    online: Optional[bool] = None
+    # force=True 绕过"同一批次已成功"的幂等拦截,逐日抢占也一并强制
+    force: bool = False
+
+
+class PipelineBackfillAccepted(BaseModel):
+    job_id: str
+    status: str
+    kind: str
+    # 协调器的幂等键日期 = dates 最后一天 = 当前可见日
+    trade_date: Optional[str] = None
+    strategy: Optional[str] = None
+    # 待补齐的交易日,由旧到新
+    dates: list[str]
+    count: int
+    # reused=True 表示命中已完成的同一批补齐,未新建任务
+    reused: bool = False
+
+
 class GatePayload(BaseModel):
     should_run: bool
     trade_date: Optional[str] = None

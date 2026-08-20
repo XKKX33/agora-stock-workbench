@@ -10,7 +10,12 @@ from fastapi.testclient import TestClient
 
 from app.config import AppSettings
 from app.main import create_app
+from engine.db import Store
 from tests.api.conftest import wait_for_job
+from tests.test_run_scan_offline import AS_OF, _TRADE_DATES
+
+# 固定装置的 160 个日历日全部开市:基准日 = AS_OF,可见日 = 往前退 20 个开市日。
+VISIBLE_AS_OF = _TRADE_DATES[-21]
 
 
 def _post_scan(client, **overrides):
@@ -112,3 +117,35 @@ def test_trade_date_matches_recorded_batch(client):
     payload = wait_for_job(client, job_id)
 
     assert payload["trade_date"] == payload["result"]["as_of"]
+
+
+
+def test_scan_targets_the_visible_session_not_the_latest(client):
+    """扫描截面必须是可见日:隐藏窗口里的行情不许拿来选股。
+
+    本地库确实有比可见日更新的行情(AS_OF),旧实现直接用它当截面,
+    等于拿"当时还看不到的数据"选股,是最直接的前视偏差。
+    """
+    payload = wait_for_job(client, _post_scan(client).json()["job_id"])
+
+    assert payload["status"] == "succeeded"
+    assert payload["trade_date"] == VISIBLE_AS_OF
+    assert payload["result"]["as_of"] == VISIBLE_AS_OF
+    assert VISIBLE_AS_OF < AS_OF
+
+
+def test_scan_rejects_when_visible_window_unavailable(tmp_path: Path):
+    """算不出可见日(库里没有基准日)时 409,绝不回退成最新交易日。"""
+    db_path = tmp_path / "no-window.duckdb"
+    with Store(db_path):
+        pass
+
+    settings = AppSettings(
+        workbench_root=Path(__file__).resolve().parents[2],
+        database_path=db_path,
+    )
+    with TestClient(create_app(settings)) as fresh:
+        response = _post_scan(fresh)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "visibility_window_unavailable"

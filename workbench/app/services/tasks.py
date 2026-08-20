@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ class TaskTracker:
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------ 写
     def claim(
@@ -53,26 +55,37 @@ class TaskTracker:
     ) -> ClaimResult:
         """抢占一个业务幂等键。返回是否抢到,以及拦住它的冲突行。"""
         task_id = uuid.uuid4().hex
-        with Store(self.db_path, ensure_schema=True) as store:
-            claimed, conflict = store.claim_task(
-                task_id=task_id,
-                kind=kind,
-                trade_date=trade_date,
-                strategy=strategy,
-                now=self.now(),
-                stale_after_seconds=stale_after_seconds,
-                force=force,
-            )
+        with self._lock:
+            with Store(self.db_path, ensure_schema=True) as store:
+                claimed, conflict = store.claim_task(
+                    task_id=task_id,
+                    kind=kind,
+                    trade_date=trade_date,
+                    strategy=strategy,
+                    now=self.now(),
+                    stale_after_seconds=stale_after_seconds,
+                    force=force,
+                )
         return ClaimResult(claimed=bool(claimed), task_id=task_id, conflict=conflict)
 
     def mark_running(self, task_id: str) -> None:
-        with Store(self.db_path, ensure_schema=True) as store:
-            store.mark_task_running(task_id, self.now())
+        with self._lock:
+            with Store(self.db_path, ensure_schema=True) as store:
+                store.mark_task_running(task_id, self.now())
 
     def heartbeat(self, task_id: str) -> None:
         """刷新心跳。长链任务每步之间调用,否则会被误判僵死并被抢占。"""
-        with Store(self.db_path, ensure_schema=True) as store:
-            store.task_heartbeat(task_id, self.now())
+        with self._lock:
+            with Store(self.db_path, ensure_schema=True) as store:
+                store.task_heartbeat(task_id, self.now())
+
+    def progress(self, task_id: str, result: dict) -> None:
+        """持久化当前步骤和全部已完成步骤，供刷新后恢复。"""
+        with self._lock:
+            with Store(self.db_path, ensure_schema=True) as store:
+                store.update_task_progress(
+                    task_id, self.now(), self._dump(result) or "{}"
+                )
 
     def finish(
         self,
@@ -84,27 +97,30 @@ class TaskTracker:
         trade_date: Optional[str] = None,
     ) -> None:
         """落库终态。trade_date 非空时回写,用于把幂等键对齐到真实批次。"""
-        with Store(self.db_path, ensure_schema=True) as store:
-            store.finish_task(
-                task_id=task_id,
-                now=self.now(),
-                status=status,
-                result_json=self._dump(result),
-                error_json=self._dump(error),
-                trade_date=trade_date,
-            )
+        with self._lock:
+            with Store(self.db_path, ensure_schema=True) as store:
+                store.finish_task(
+                    task_id=task_id,
+                    now=self.now(),
+                    status=status,
+                    result_json=self._dump(result),
+                    error_json=self._dump(error),
+                    trade_date=trade_date,
+                )
 
     # ------------------------------------------------------------ 读
     def get(self, task_id: str) -> Optional[dict]:
         """按 task_id 取任务行(已装饰)。不存在返回 None。"""
-        with Store(self.db_path, ensure_schema=False) as store:
-            task = store.get_task(task_id)
+        with self._lock:
+            with Store(self.db_path, ensure_schema=False) as store:
+                task = store.get_task(task_id)
         return self.decorate(task) if task is not None else None
 
     def recent(self, *, kind: Optional[str] = None, limit: int = 20) -> list[dict]:
         """最近任务,按创建时间倒序。"""
-        with Store(self.db_path, ensure_schema=False) as store:
-            frame = store.recent_tasks(limit=limit, kind=kind)
+        with self._lock:
+            with Store(self.db_path, ensure_schema=False) as store:
+                frame = store.recent_tasks(limit=limit, kind=kind)
         if frame.empty:
             return []
         return [self.decorate(row) for row in frame.to_dict(orient="records")]

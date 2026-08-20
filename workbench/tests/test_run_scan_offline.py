@@ -25,7 +25,7 @@ if _ENGINE_PARENT not in sys.path:
     sys.path.insert(0, _ENGINE_PARENT)
 
 from engine.db import Store  # noqa: E402
-from engine.run_scan import run_scan  # noqa: E402
+from engine.run_scan import run_scan, to_legacy_output  # noqa: E402
 
 
 def _check(name, cond):
@@ -36,7 +36,7 @@ def _check(name, cond):
 
 # ---------------------------------------------------------------- 合成行情
 
-_TRADE_DATES = pd.bdate_range("2025-01-01", periods=160).strftime("%Y%m%d").tolist()
+_TRADE_DATES = pd.bdate_range(end="2025-08-12", periods=180).strftime("%Y%m%d").tolist()
 AS_OF = _TRADE_DATES[-1]
 
 
@@ -193,8 +193,84 @@ def test_run_scan_offline_end_to_end():
             _check("门槛结果同时存在", set(rows["passed"].tolist()) == {True, False})
 
 
+def test_scan_batch_identity_is_reproducible_and_scope_isolated():
+    with tempfile.TemporaryDirectory() as tmp:
+        dbp = os.path.join(tmp, "t.duckdb")
+        with Store(dbp) as store:
+            _seed_db(store)
+
+        first = run_scan(
+            strategy_name="strong_mainup", online=False, db_path=dbp,
+            record=True, as_of=AS_OF, overrides={"top_n": 3},
+        )
+        second = run_scan(
+            strategy_name="strong_mainup", online=False, db_path=dbp,
+            record=True, as_of=AS_OF, overrides={"top_n": 3},
+        )
+        assert second.run_id == first.run_id
+        assert second.candidate_hash == first.candidate_hash
+        assert second.config_hash == first.config_hash
+        assert second.data_cutoff_at == first.data_cutoff_at
+        with Store(dbp, ensure_schema=False) as store:
+            runs = store.scan_runs()
+            assert len(runs) == 1
+            assert int(store.scan_rows(first.run_id).shape[0]) == first.scored_count
+            run = store.scan_batch(
+                first.run_id, as_of=AS_OF, strategy="strong_mainup"
+            )[0]
+            assert run["config_hash"] == first.config_hash
+
+        other = run_scan(
+            strategy_name="strong_mainup", online=False, db_path=dbp,
+            record=True, as_of=AS_OF, overrides={"top_n": 2},
+        )
+        assert other.run_id != first.run_id
+        with Store(dbp, ensure_schema=False) as store:
+            assert len(store.scan_runs()) == 2
+            assert len(store.scan_rows(first.run_id)) == first.scored_count
+
+
+def test_legacy_output_preserves_stock_feature_contract():
+    with tempfile.TemporaryDirectory() as tmp:
+        dbp = os.path.join(tmp, "t.duckdb")
+        with Store(dbp) as store:
+            _seed_db(store)
+
+        result = run_scan(
+            strategy_name="strong_mainup",
+            online=False,
+            db_path=dbp,
+            record=False,
+            as_of=AS_OF,
+            overrides={"top_n": 3},
+        )
+        output = to_legacy_output(result, price_max=70.0)
+
+        assert output["final"]
+        row = output["final"][0]
+        assert {
+            "weekly_bull",
+            "ma_stack",
+            "vol5_20",
+            "vol20_60",
+            "amt5_20",
+            "vol_score",
+            "net5",
+            "big5",
+            "big_pos_days",
+            "money_class",
+            "score",
+        } <= set(row)
+        assert "run_date" not in row
+
+
 def _run_all():
-    for fn in (test_store_pit_filters, test_run_scan_offline_end_to_end):
+    for fn in (
+        test_store_pit_filters,
+        test_run_scan_offline_end_to_end,
+        test_scan_batch_identity_is_reproducible_and_scope_isolated,
+        test_legacy_output_preserves_stock_feature_contract,
+    ):
         print(f"[{fn.__name__}]")
         fn()
     print("\nALL PASSED")

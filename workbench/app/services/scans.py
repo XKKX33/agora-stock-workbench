@@ -2,11 +2,29 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from engine.config import load_settings
 from engine.db import Store
-from engine.run_scan import run_scan
+from engine.ingest_tushare import (
+    confirm_latest_trade_date,
+    ingest_calendar,
+    ingest_snapshot,
+)
+from engine.run_scan import (
+    ScanResult,
+    _calendar_lookahead_end,
+    _make_client,
+    prepare_scan_data,
+    score_prepared_scan,
+    validate_scan_integrity,
+)
+from engine.visibility import (
+    LookaheadBlocked,
+    require_visible_as_of,
+    resolve_window,
+)
 
 from app.errors import WorkbenchError
 from app.services.tasks import DEFAULT_STALE_AFTER_SECONDS, TaskTracker
@@ -14,6 +32,9 @@ from app.services.tasks import DEFAULT_STALE_AFTER_SECONDS, TaskTracker
 logger = logging.getLogger(__name__)
 
 TASK_KIND = "scan"
+
+# 交易日历口径:全项目统一按上交所日历推可见窗口。
+EXCHANGE = "SSE"
 
 # 单次扫描比盘后任务链短,沿用 TaskTracker 的默认僵死阈值即可。
 STALE_AFTER_SECONDS = DEFAULT_STALE_AFTER_SECONDS
@@ -46,22 +67,29 @@ class ScanManager:
 
         force=True 时强制重跑,绕过 succeeded 检查。
 
-        注意:抢占时只能用本地 latest_confirmed_date 预解析 trade_date。
-        在线模式下 Tushare 可能返回更新的交易日,run_scan 实际写入的 as_of
-        会晚于此处的键。_run() 完成时会把真实 as_of 回写到 task_runs.trade_date,
-        使幂等键与真实批次对齐,后续同 as_of 的重跑仍能被拦住。
+        日期口径(可见闸门):扫描截面只能是可见日 = 基准日往前退 N 个开市日,
+        不再让 run_scan 自己去确认"最新交易日"——那等于拿隐藏窗口里的行情选股,
+        是最直接的前视偏差。这里用本地基准日预解析可见日作为抢占键;在线模式下
+        Tushare 可能确认出更新的基准日,`_run()` 会用刷新后的基准日重算可见日,
+        并在完成时把真实 as_of 回写到 task_runs.trade_date,使幂等键与真实批次
+        对齐,后续同 as_of 的重跑仍能被拦住。
+
+        窗口算不出来(没有基准日 / 日历没覆盖 / 历史开市日不足)一律 409 报错,
+        绝不回退成最新交易日。
         """
         settings = load_settings()
-        min_rows = int(settings["data"]["min_daily_rows"])
 
         with Store(self.db_path, ensure_schema=False) as store:
-            trade_date = store.latest_confirmed_date(min_rows) or store.latest_date()
-        if trade_date is None:
+            window = resolve_window(store, settings, exchange=EXCHANGE)
+        try:
+            trade_date = require_visible_as_of(window)
+        except LookaheadBlocked as exc:
             raise WorkbenchError(
-                "no_market_data",
-                "数据库无可用交易日数据,无法启动扫描",
-                status_code=503,
-            )
+                exc.code,
+                str(exc),
+                status_code=409,
+                details=window.as_dict(),
+            ) from exc
 
         claim = self.tracker.claim(
             kind=TASK_KIND,
@@ -102,7 +130,9 @@ class ScanManager:
             )
 
         # 抢占成功,提交后台执行
-        self._executor.submit(self._run, claim.task_id, strategy, online, record)
+        self._executor.submit(
+            self._run, claim.task_id, strategy, online, record, trade_date
+        )
         return {
             "job_id": claim.task_id,
             "task_id": claim.task_id,
@@ -114,7 +144,58 @@ class ScanManager:
             "reused": False,
         }
 
-    def _run(self, task_id: str, strategy: str, online: bool, record: bool) -> None:
+    def _scan_visible(
+        self, *, strategy: str, online: bool, record: bool, visible_as_of: str
+    ) -> ScanResult:
+        """按可见日截面执行一次扫描。
+
+        在线摄取语义照旧:先向 Tushare 确认最新交易日,把日历和最新截面写进库
+        (原始行情/K 线/总览仍看最新数据,不受可见闸门限制),再用刷新后的基准日
+        重算可见日。只有持续摄取最新交易日,窗口才会往前推。
+
+        评分输入固定 as_of=可见日:显式把日期传进 prepare_scan_data,不再让它
+        自己去确认最新交易日,否则隐藏窗口里的行情又会被拿去打分。
+        """
+        settings = load_settings()
+        client = None
+        target = visible_as_of
+        if online:
+            client = _make_client(settings)
+            base, _confirmed_rows = confirm_latest_trade_date(
+                client, int(settings["data"]["min_daily_rows"])
+            )
+            start_cal = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+            with Store(self.db_path, ensure_schema=True) as store:
+                ingest_calendar(
+                    store, client, start_cal, _calendar_lookahead_end(), exchange=EXCHANGE
+                )
+                ingest_snapshot(store, client, base)
+                window = resolve_window(
+                    store, settings, exchange=EXCHANGE, base_session=base
+                )
+            # 在线基准日以 Tushare 确认为准,可见日随之重算;不可用直接上抛,
+            # 由 _run() 落成 failed 并带上原因。
+            target = require_visible_as_of(window)
+
+        prepared = prepare_scan_data(
+            strategy_name=strategy,
+            online=online,
+            db_path=str(self.db_path),
+            settings_override=settings,
+            client=client,
+            as_of=target,
+        )
+        validate_scan_integrity(prepared)
+        return score_prepared_scan(prepared, record=record)
+
+    def _run(
+        self,
+        task_id: str,
+        strategy: str,
+        online: bool,
+        record: bool,
+        visible_as_of: str,
+    ) -> None:
         """后台线程执行扫描,更新 task_runs 状态。
 
         失败时先落库再原样上抛:任务表留下 failed 与错误详情供 API 查询,
@@ -123,11 +204,11 @@ class ScanManager:
         self.tracker.mark_running(task_id)
 
         try:
-            result = run_scan(
-                strategy_name=strategy,
+            result = self._scan_visible(
+                strategy=strategy,
                 online=online,
-                db_path=str(self.db_path),
                 record=record,
+                visible_as_of=visible_as_of,
             )
         except Exception as error:
             self.tracker.finish(
