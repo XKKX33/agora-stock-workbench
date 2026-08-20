@@ -31,3 +31,35 @@
 - **Notes**: 已将当前设计收窄为工作台内的一键完整流程。
 
 ---
+
+## [LRN-20260811-002] correction
+
+**Logged**: 2026-08-11T21:20:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: infra
+
+### Summary
+
+更新 Windows 用户级环境变量后，不需要把重启 Codex 说成必要条件。
+
+### Details
+
+已运行进程不会自动刷新环境变量快照，但后续 PowerShell 命令可以直接从 User 级环境读取新值，并只注入即将启动的 Python 子进程。因此重启只是可选做法，不是模型接口或 Codex 的要求。
+
+### Suggested Action
+
+需要读取刚更新的用户环境变量时，在执行命令内显式调用 `[Environment]::GetEnvironmentVariable(..., 'User')` 并设置子进程环境，不要求用户重启应用。
+
+### Metadata
+
+- Source: user_feedback
+- Related Files: lessons.md
+- Tags: windows, environment-variable, process-inheritance, correction
+
+### Resolution
+
+- **Resolved**: 2026-08-11T21:20:00+08:00
+- **Notes**: 已纠正后续操作说明，不再要求重启 Codex。
+
+---

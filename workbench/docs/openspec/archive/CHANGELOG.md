@@ -19,3 +19,10 @@
 - 新增 app/services/kline.py(搜索 + 日 K + MA/MACD/KDJ/RSI/BOLL 全指标后端计算)与 app/services/screener.py(全市场筛选),含 API 路由与 15 个新测试。
 - 舆情快照归属修复:TrendRadar 热榜无权威发布时间,快照条目按采集日归属最近已收盘交易日(resolve_snapshot_trade_date),不再被未来数据闸门误拒;非快照来源的未来数据防线不变。实测 253 条入库、复盘 8/8 节全齐。
 - 全量测试 319 passed(2026-08-01 复核)。
+
+## 2026-08-17
+
+- 归档阶段：一键全流程与按日期实验追踪（one-click-experiment-tracking），状态 archived。
+- 真实九步任务 `d442e819cd7a4443b1d90e060e604051` 成功；规则、AI、混合、基准四组决策已写入真实库。
+- 局部数据和模型失败按候选隔离，150 根历史、严格 JSON、前视与哈希校验标准保持不变。
+- 最终验证：Python 759 passed，Pi Agent 17 passed，TypeScript 类型检查和 18 个前端脚本检查通过，均为 0 failed。

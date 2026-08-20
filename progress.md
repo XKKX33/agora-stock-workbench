@@ -1,5 +1,27 @@
 # 进度记录
 
+## 2026-08-17 九步流程软门控
+
+- 九步编排改为逐步骤隔离异常：失败记为 `warning`，依赖缺失记为 `skipped`，独立步骤继续执行。
+- 全市场和候选覆盖率不足改为可审计的数据质量警告；单只股票历史、快照或智能体分析失败只排除该股票。
+- 舆情、历史收益和 Pi Agent 不可用不再阻断规则扫描；智能体少返回结果按实际数量保存。
+- 实验落库允许保存当前可用组；无智能体结果时只保存规则组和基准组，哈希与事务校验仍阻止无效数据写入。
+- 历史补齐记录失败或占用日期后继续后续日期；Tushare `None` 响应会重试，单股历史和资金流失败不会停止剩余股票。
+- 验证结果：Python `757` 项通过，TypeScript `15` 项通过，TypeScript 类型检查通过。
+
+## 2026-08-04 一键全流程阶段
+
+- 用户确认工作台按信号日期追踪四组实验、成交状态和后续收益。
+- 正式设计状态改为已确认；自动运行仅指点击一次后的业务流程，不含开机自启或计划任务。
+- 完成 AI 配置、自动流程和真实证据三路审计；当前基线为 434 项通过、0 项失败。
+- 已生成详细实施计划和 OpenSpec 提案，下一步进入测试驱动实现。
+- DeepSeek 配置与请求契约完成：新增测试先出现 3 项预期失败，实施后相关回归 47 项通过；规格审查和代码质量复审均通过。
+- 实验表与事务存储完成：质量审查发现残缺四组可能误标成功后，新增 20 项红灯回归；修复后实验存储 35 项通过，复审通过。
+- 新增界面验收范围：系统选股、完整流程、Agent 选股与单股研判按钮必须区分清楚；情绪页先复现真实 UI 问题再修根因。
+- 四组构造与收益回填完成：规则、AI、混合、基准统一冻结候选池；次日开盘成交、一字涨停不可成交、四期收益和历史涨跌停价补采均已用 77 项测试锁定，质量复审通过。
+- 已完成 Gemini 明亮界面只读调研：采用中性近白背景、低阴影、圆形工具按钮和淡蓝主操作；工作台保留高密度布局并新增暗夜主题。
+- 按日期实验查询 API 完成：列表支持信号日、组别、股票和成交状态精确筛选，批次详情保留审计元数据，四期汇总严格区分空值与真实 0；红灯 10 项失败，实施后相关回归 75 项通过。
+
 ## 2026-07-31
 
 - 已确认目标范围为“收盘后自动复盘 + 舆情系统”，机器学习和深度学习训练不在本阶段。
@@ -386,3 +408,134 @@
 
 ### 验证
 - 全量回归：**433 passed / 0 failed**（431 → +2）。
+
+
+## 2026-08-10 防前视闸门收口：命令行入口 + 旧台账回填
+
+接口层的可见日闸门已经生效，这一轮把两个绕过它的口子补上。两处都是"闸门算了但没用上"，不是新功能。
+
+### 收盘任务链把可见日算了却没传给扫描
+
+`engine/close_pipeline.run_close_pipeline` 的命令行入口先用 `require_visible_as_of` 算出可见日，传进来的 `trade_date` 只被当成"闸门目标"用于日志比对，第 2 步 `run_scan(...)` 没传 `as_of`。而 `run_scan` 不收 `as_of` 时按纯数据口径取"本地/在线最新交易日"——正好是隐藏窗口里的那天。结果整条链的截面、舆情、复盘全部落在隐藏窗口内。
+
+改成把 `trade_date` 原样传给 `run_scan(as_of=...)`。随之两处死代码清掉：截面不再可能与闸门目标不一致，那段 `logger.info("实际批次 %s 与闸门目标 %s 不一致")` 分支不可达；扫描步 `data` 里的 `gate_target_date` 恒等于 `as_of`，无消费方，删。
+
+### 旧台账回填用隐藏窗口的收盘价填 retN
+
+`engine/postmortem.backfill_returns` 判定"未来到了没"只看 `store.latest_date()`（已入库行情最大日期）。库里的行情是一直摄取到最新的，所以隐藏窗口内的收盘价对它完全可见——历史选股的 `ret1/ret3/ret5/ret10` 会被当时看不到的价格填上，而这些字段正是 IC 自检、回测、因子体检的标签来源。
+
+加 `visible_max` 参数，口径与 `engine/returns.py` 的 `_future_status` 完全一致：先判隐藏（`future_not_visible`）、再判数据缺失（`future_not_reached`），顺序不能反，否则本地已有行情的隐藏日会被直接读走。两类都是"正常等待"，一起从 `needs_attention()` 里排除（新增 `_WAITING_REASONS` 常量），避免把"还不该看"误报成"缺数据要人处理"。
+
+四个调用方全部接上：在线扫描内部回填传截面日、收盘链条回填步传截面日并在 step data 里带出 `visible_max`、`postmortem` 命令行固定取可见日、`review` 命令行的 `--trade-date` 超限直接拒绝（复盘会把当天结论和收益回看摊开，和接口层同一条纪律）。`build_review` 的 `visible_max` 只是透传，堵住 `backfill=True` 这条公开路径绕过闸门。
+
+`visible_max=None` 保留为"调用方不设上限"，只给纯历史离线补全用，与 `returns.py` 同构。
+
+### 验证
+
+- 反证测试能抓 bug：合成库上不传 `as_of` 跑 `run_scan`，截面回到最新交易日 `20250812`（可见日是 `20250715`）——新测试断言的正是这个差别。
+- 新增 3 条回归：链条截面必须等于传入的可见日、回填步必须带可见上限、隐藏窗口内目标日记 `future_not_visible` 且保持 NULL（同一用例带对照组：不设上限时同一批数据能填上，证明是闸门拦的、不是缺数据）。
+- 真实库命令行实跑：`review --trade-date 20991231` 被拒并报出可用最新日 `20260706`；`review --trade-date 20260706` 正常出结果；`postmortem`（跑在库副本上，未动真实库）摘要里 `visible_max` 为 `20260706`，有 1 条目标日落在隐藏窗口被记 `future_not_visible`。
+- 全量回归：**676 passed / 0 failed**（673 → +3）。
+
+## 2026-08-10 闸门补到因子训练入口
+
+命令行四个入口收口后，把 `latest_date()` / `latest_confirmed_date()` 的调用点又过了一遍。三类分开判：
+
+- 不受限，不动：`app/services/screener.py:80`（全市场条件筛选）、`app/services/kline.py:195`（K 线）、`app/repositories/market.py:36`（库状态展示）。结果不落台账、不进实验与评估，README 里「行情查询不受影响」说的就是这几处。
+- 闸门在调用方，不动：`engine/experiments.py:360` 的 `required_entry_limit_dates` 用 `latest_date()` 判「买入日到了没」，一键流程在外面又按 `date <= visible_as_of` 过滤了一遍（`app/services/one_click.py:275-279`）。补采涨跌停数据本身不是前视，用不用由回填侧的可见上限决定。
+- 真漏，已修：`engine/ml/dataset.py` 的 `build_dataset` 不传 `end` 就取库里最新交易日，而唯一的训练入口 `tools/train_ml.py` 从来没传过——因子体检的训练样本一直覆盖隐藏窗口。
+
+### 为什么训练里的泄漏更要堵
+
+`build_dataset` 本来就会把采样上限往前退 N 个开市日（`label_cutoff`），那是为了让标签的 T+N 已经发生，不是可见性判断：库里行情已经摄取到最新，退 N 天之后仍然落在隐藏窗口里面。结果是模型用「当时还没落地的行情」拟合，再拿它给可见日打分——泄漏发生在训练里，样本外 IC 看着还挺正常，事后从指标上分辨不出来。
+
+修法沿用既有纪律，闸门只放在入口，engine 层保持纯数据口径：`train_from_store` 加 `end` 参数原样透传 `build_dataset`；`tools/train_ml.py` 先 `resolve_window` 再 `require_visible_as_of`，默认截止日就是可见日，新增的 `--end` 走 `ensure_visible`，超限直接退出。两处都判会出现两套口径，测试里专门钉了一条「不传 `end` 仍取库里最新日」防止有人把闸门塞进 engine。
+
+`DatasetReport` 加 `end_day` 并写进产物 `dataset` 段：一份模型看到哪天为止，是事后判断它能不能用的必要信息，原来只有 `label_cutoff`，看不出截止日。产物 `dataset` 是自由字典（`registry.py:158` 直接 `dict()` 透传），加字段不影响读取方。
+
+### 顺带修掉一个从没跑通的默认值
+
+`tools/train_ml.py --strategy` 默认写的是 `"default"`，但 `config/strategies/` 下只有 `strong_mainup.yaml`——不带 `--strategy` 跑必然 `FileNotFoundError`，是实跑验证时撞出来的。改成 `settings.engine.default_strategy`，与 `run_scan.py:569` 同一口径。文件里上一条注释记着同类问题（`settings["storage"]` 写错但因为一直显式传参而没暴露），同一个入口第二次出现「默认分支从没被走过」。
+
+### 验证
+
+- 新增 3 条回归（`tests/test_visibility.py`）：训练截止日的三个分支（默认取可见日 / 显式合法照用 / 显式越界抛 `lookahead_blocked`）、`end` 压住采样上限、不传 `end` 保持纯数据口径。
+- 真实库副本实跑（未动真实库）：默认跑法 `dataset.end_day` 为 `20260706`（可见日），库里最新是 `20260812`；`--end 20260812` 与 `--end 20991231` 都被拒并报出可用最新日 `20260706`。
+- 全量回归：**679 passed / 0 failed**（676 → +3）。第一次跑漏了清空 `WORKBENCH_AI_API_KEY`，6 条 AI 用例真的打到线上模型接口拿了 404；带空凭据重跑全绿。（这条环境依赖已在同日根治，见下一节末尾，现在带凭据跑全量也全绿。）
+
+## 2026-08-10 实验台账与收益收敛为一份口径
+
+`experiment_decisions` 上原来挂着 16 个旧列（`entry_date` / `entry_price` / `entry_status` / `entry_reason` / `ret{1,3,5,10}` 及其 `_target_date` / `_status` / `_reason`），和独立的 `experiment_returns` 并存。两套口径同时存在，页面读哪一套都可能和另一套对不上，旧列在最后一个写入方被移除后又永远是 NULL，台账上就是一片空白列。
+
+### 顺带撞出来的真实错误
+
+旧回填在涨停封板、缺涨跌停价这两种「买不到」的情况下，仍然把当天开盘价写进了 `entry_price`。结果是「到底买到没买到」分不清：有价格的行看起来都像成交了。现在 `entry_price` 只在真的买到时才有值，买不到留空并由 `status` / `reason` 说明原因（`limit_up_locked` / `limit_price_missing` / `entry_bar_missing`）。
+
+### 改动
+
+- 库层：旧列从 DDL 删除，`Store(ensure_schema=True)` 每次开库执行 `_drop_legacy_decision_columns()`——只 DROP 还残留的旧列，一个事务、幂等，决策数据不动。
+- 接口层：`GET /api/experiments` 每行挂 `entry_status` 与 `returns.{horizon}`；汇总统一走 `GET /api/returns/summary`，并支持和台账同一套筛选（`as_of` / `group_name` / `ts_code` / `entry_status`）；原 `/api/experiments/summary` 删除。
+- 前端：p5 台账页只读上面两个接口，`STATUS_LABELS` / `HORIZON_LABELS` 提供全量中文映射，算不出的格子显示「—」并把原因写进 `title`，绝不退化成 0。
+
+### 验证
+
+- 真实库副本 + 两个合成批次冒烟：已成交、涨停封板、缺涨跌停价、从没算过四种状态在接口与页面上各自成立（AI -0.74%、混合 -5.62% 有值，规则与基准为「—」并带原因）。
+- 浏览器实跑 p5（库副本，未动真实库）：筛 `filled` 与 `entry_unavailable` 时，四组卡、十期收益带、明细表和「当前筛选 N 条」同步收敛，覆盖率与状态占比一致，错误横幅为空。
+- 全量回归：**679 passed / 0 failed**。
+
+### 顺带修掉测试对开发机环境的依赖
+
+`tests/api/conftest.py` 的 `offline_settings` 夹具现在按配置里声明的 `api_key_env` 逐个 `delenv`（`ai` 与 `agent` 两段）。原来「没配凭据要报 unconfigured」的 6 条用例只有在开发机没导出过 `WORKBENCH_AI_API_KEY` 时才绿，其中 AI 复盘用例还会真的去打线上模型接口（拿到 404）。测试断言的是代码行为，不该由开发机环境决定；需要凭据的用例自己 `setenv` 即可，夹具先跑不会被覆盖。
+
+## 2026-08-11 流程页收尾
+
+- 九步成功结果补齐中文 `detail`，说明直接使用该步真实日期、数量和状态；失败步骤从任务错误记录显示原因，不再出现「这一步没有留下说明」。
+- 历史补齐的舆情步骤保持后端 `skipped` 语义，前端明确映射为「未执行」，不再误标绿色成功。
+- 副本库浏览器验收：失败于完整性时，步骤卡显示「daily 行数未超过完整收盘阈值 1000」；历史任务、四组总数和 260 条基准分页正常，无页面重叠。
+- 定向回归 76 passed / 0 failed；全量回归 682 passed / 0 failed。
+- 真实模型最小请求与真实库流程当时未执行：当时未设置 `WORKBENCH_AI_API_KEY`，且没有用户对真实库写入的明确授权；OpenSpec 保持 apply 状态，不提前归档。
+
+## 2026-08-11 真实模型联调
+
+- 环境已出现 `WORKBENCH_AI_API_KEY`，但默认 `base_url` 缺少 `/v1`，真实请求落到网页路由并返回 `404`；已把 AI 与 Agent 地址统一修正为 `https://grok.xuan.christmas/v1`。
+- TDD 红灯为 2 failed / 22 passed；修正配置后定向回归 24 passed / 0 failed。
+- 修正路由后，最小请求和 `/v1/models` 都返回 `401 invalid_api_key`；当前密钥格式正常但服务判定无效，未完成真实模型验收。
+- 未运行真实库一键流程，OpenSpec 保持 apply 状态。
+- 最终全量回归 682 passed / 0 failed；规格复核通过，质量复核指出的测试重复断言与设置页文档漂移已修正并复审通过。
+- 用户改为把有效密钥保存在 Git 忽略的 `workbench/.env`；新增统一加载器并由 `serve.py` 启动时调用，Windows 用户环境中的同名值已移除。
+- `/v1/models` 确认模型 ID 为 `grok-4.5`，一次无重试最小 JSON 请求成功；真实模型验收已完成，真实库流程仍等待明确授权。
+- `python-dotenv` 已恢复为正式依赖，启动顺序测试可捕获“先导入配置、后加载 `.env`”的错误；最终全量回归 685 passed / 0 failed，独立复审通过。
+## 2026-08-17 真实库生产式验收
+
+- 已按用户授权创建真实库原样备份：`workbench/data/market.duckdb.bak-20260817-184226-production-acceptance`；备份创建时源库与备份均为 59,256,832 字节，SHA-256 均为 `aa9e3a7c7642b0b2acd95499e0c089c70de417dd9acf6c853825b49665da49b5`。
+- 前端真实页面验收：14 个页面均成功加载，页面 API 请求均返回 200；修复了回测成本/成交规则控件未接通、选股扫描缺少 `request` 导入、流程终态按钮不恢复三个现有功能问题。
+- 修复后全量回归 **749 passed / 0 failed**，全部页面脚本 `node --check` 通过。
+- 真实库在线九步流程执行两次，均在 `market_data` 失败：第一次为 Tushare `moneyflow` 连续失败，第二次为候选股票历史窗口不足；两次均未进入 scan/news/Agent/persist_experiment，未生成成功实验决策。
+- 验收期间真实库确实写入了在线摄取数据与失败任务记录；复核时 `task_runs=25`、`daily=217088`、`daily_basic=38711`、`moneyflow=10992`、`trade_cal=453`、`news_items=801`、`picks=38`、`experiment_decisions=0`、`experiment_returns=0`。当前数据库 SHA-256 为 `c327c164c3f1556f45e4e583084844a114c7b2ec8b0b80e1acdbb74dc3243e08`。
+- 当前生产式验收结论：前端现有功能已完成真实请求级验收；完整九步闭环**未成功**，阻塞点是在线市场数据完整性/接口条件，不是 Agent 配置或前端按钮。
+- 真实页面进一步点击验收：p1「离线扫描」真实提交 `/api/scans`，任务 `c8752b8220ec48dba071e36b029f2555` 成功（260 候选、259 评分、31 通过、6 最终），页面显示 `succeeded`，两个扫描按钮恢复可点击。
+- 最终数据库复核：数据库与备份均可读；备份哈希保持不变。当前库 `task_runs=26`，两次生产流程任务均为 failed，新增的扫描任务 succeeded；`experiment_decisions=0`，未伪造成功实验数据。
+- Tushare 重试策略已按要求从 3 次调整为 5 次，新增红灯测试验证前 4 次失败、第 5 次成功，摄取层回归 **31 passed / 0 failed**。
+- 使用五次重试重新执行真实在线九步流程，任务 `6dadb5ebc76d43809a45ceadf977182b` 仍在 `market_data` 因「候选股票历史窗口不足」失败；这次已不再是资金流接口重试问题，说明五次重试已越过第一道临时接口失败，但历史数据完整性仍不足。
+- 实验决策仍为 0，未绕过历史窗口检查，也未伪造后续流程结果。
+
+## 2026-08-17 九步软门控与真实闭环完成
+
+- 保留每只股票 150 根历史标准；`001399.SZ` 仅有 `17/150` 根，单独排除后其余 259 只继续评分。
+- Pi Agent 改为逐只严格校验；2 只非法分析被记录并排除，18 只有效结果继续完成辩论和最终筛选，不合成模型结果。
+- 真实任务 `d442e819cd7a4443b1d90e060e604051` 成功：规则 3、AI 3、混合 3、基准 20 全部落库，Agent 报告可用。
+- 数据库只读核对通过：`experiment_runs`、`agent_runs`、`scan_runs` 均为 `succeeded`，3 条最终判断和 29 条四组决策存在，错误字段为空。
+- Review 发现 `to_legacy_output()` 的单股字段被扫描批次字段误覆盖并引用未定义 `run_date`；已用红灯测试复现后恢复旧契约。
+- 终态语义复查后补强：九步仍全部尝试，但若最终没有完成实验原子提交，任务明确标记失败；行情实际入库行数少于交易日确认行数时记录完整性警告。
+- 最终验证：Python 759 passed / 0 failed；Pi Agent 17 passed / 0 failed；TypeScript 类型检查通过；前端脚本 18 passed / 0 failed；离线扫描文件手动入口 4 passed / 0 failed。
+- OpenSpec `one-click-experiment-tracking` 已满足真实库验收条件并归档。
+
+## 2026-08-18 前后端逐功能验收接续
+
+- 接手原验收任务，从自选股返回值修复处继续；没有重启原线程，也没有重复启动 Agent。
+- 自选股真实接口闭环通过：首次新增 `added=true`、重复新增 `added=false`、首次删除 `removed=true`、重复删除 `removed=false`，数据库数量 `0 → 1 → 0`。
+- 设置接口读写回环通过，未保存密钥明文；保存后配置仍保持原值。
+- 14 个页面返回 `200`；核心只读 API 21 个全部返回 `200`；健康检查显示数据库 ready。
+- 全量回归 **764 passed / 0 failed**；全部前端 JavaScript 文件 `node --check` 通过。
+- 验收结束时自选股数量为 `0`，没有留下测试数据；已有 Agent 历史任务为 `5 succeeded / 16 failed`，流程历史为 `3 succeeded / 10 failed`，未新增任务。
+- 本轮没有重新执行九步在线流程，避免把已经完成的真实流程结果和本次页面验收混在一起。
