@@ -13,6 +13,11 @@ workbench/data/
 *.duckdb.bak-*
 *.parquet
 
+# ── 本机运行时配置（设置页写入，含本机 endpoint/模型偏好）────
+# settings.yaml 是入库的默认值；settings.local.yaml 由 /api/settings 覆盖写入，
+# 属于本机偏好，不入库。密钥始终只走 WORKBENCH_AI_API_KEY，两个文件都不存明文。
+workbench/config/settings.local.yaml
+
 # ── 外部 GPL 源码（vendor）────────────────────────────
 # TrendRadar 是 GPL-3.0，原样保留在 vendor/ 且自带 .git。
 # 不纳入本仓库：避免嵌套 repo，也避免把 GPL 代码复制进我们的版本历史。
@@ -27,6 +32,16 @@ workbench/vendor/
 __pycache__/
 *.pyc
 *.pyo
+# 浏览器自动化临时快照
+.playwright-cli/
+# 浏览器验收截图产物
+workbench/output/
+
+# 一次性诊断脚本与手工构造的请求样本（排障用，用完即弃，不入库）
+.tmp_*
+
+# Node 依赖（pi_agent 走 package-lock.json 复原）
+node_modules/
 
 # 浏览器验收的临时演示实例（含副本库与截图）
 .ui-demo-*/
