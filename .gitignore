@@ -47,6 +47,10 @@ node_modules/
 .ui-demo-*/
 .ui-check-*.png
 
+# 验收用的数据库副本与临时启动器。验收必须跑在副本上，
+# 真实库只读；这个目录里的东西用完即弃，不入库。
+.acceptance/
+
 # 服务日志
 *.log
 
