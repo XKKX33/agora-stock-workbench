@@ -68,6 +68,7 @@ venv/
 
 # ── 个人开发流水账（不入公开仓库）───────────────
 # 历史实施计划/设计文档、主题截图、踩坑记录、开发进度，公开仓库不需要。
+workbench/docs/superpowers/
 docs/superpowers/
 docs/theme_shots/
 .learnings/
