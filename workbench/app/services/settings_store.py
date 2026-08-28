@@ -77,7 +77,11 @@ def save_local(patch: dict) -> dict:
 
 
 def read_ui_values() -> dict:
-    """给设置页面用的脱敏值: api_key 只返回环境变量名, 不返回密钥。"""
+    """给设置页面用的脱敏值: api_key 只返回环境变量名, 不返回密钥。
+
+    刻意不返回 settings.local.yaml 的路径:页面不需要它,而任何能打开页面的人
+    都会看到服务器的磁盘布局。要知道配置写在哪,看文档或服务端日志。
+    """
     settings = load_settings_with_override()
     agent = settings.get("agent") or {}
     ai = settings.get("ai") or {}
@@ -90,7 +94,6 @@ def read_ui_values() -> dict:
             "half_life_days": news.get("half_life_days"),
             "close_cutoff": news.get("close_cutoff"),
         },
-        "local_file": str(LOCAL_FILE),
     }
 
 

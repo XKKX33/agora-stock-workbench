@@ -407,6 +407,76 @@ def test_experiment_and_task_success_commit_in_one_transaction(tmp_path):
         assert store.con.execute("SELECT COUNT(*) FROM picks").fetchone()[0] == 1
 
 
+def test_rerunning_same_signal_date_keeps_every_batch_but_only_latest_picks(tmp_path):
+    """同一信号日重跑：实验台账每次都留，picks 只留最后一次。
+
+    这是两种保存语义并存的地方，也是最容易看错的地方——`picks` 里 8/21 只有 6 行会让人
+    以为那天只跑了一次，实际跑了 6 次。
+
+    - `experiment_decisions` 主键含 run_id，每次运行独立留存，台账才能按批次追溯。
+    - `picks` 主键 (as_of, strategy, ts_code) 不含 run_id，同一信号日整组替换。它是回测与
+      ML 训练的输入，要的是「每个交易日一份不重叠的名单」；同一天留 6 份会让同一笔钱被算
+      6 次，净值直接虚高 6 倍。
+    """
+    with Store(tmp_path / "rerun.duckdb") as store:
+        for index, run_id in enumerate(("first-run", "second-run", "third-run")):
+            claimed, _ = store.claim_task(
+                task_id=run_id,
+                kind="one_click_pipeline",
+                trade_date="20260804",
+                strategy="hermes",
+                now=f"2026-08-04T15:3{index}:00+08:00",
+                # 幂等作用域是 (kind, trade_date, strategy)：已成功的任务会挡住同一信号日
+                # 的后续运行。重跑走 force，与线上 POST /api/pipelines {"force": true} 一致。
+                force=index > 0,
+            )
+            assert claimed, f"{run_id} 没抢到任务槽位"
+            store.mark_task_running(run_id, f"2026-08-04T15:3{index}:30+08:00")
+            store.create_experiment_run(_run_row(run_id))
+            store.record_experiment(
+                _run_row(run_id),
+                _decisions(run_id),
+                task_completion=_task_completion(run_id),
+                scan_completion=_scan_completion(run_id),
+            )
+
+        # 累积：三个批次的元数据与四组名单都在。
+        assert store.con.execute(
+            "SELECT COUNT(*) FROM experiment_runs WHERE as_of = '20260804'"
+        ).fetchone()[0] == 3
+        assert store.con.execute(
+            "SELECT COUNT(DISTINCT run_id) FROM experiment_decisions"
+        ).fetchone()[0] == 3
+        for run_id in ("first-run", "second-run", "third-run"):
+            assert len(store.experiment_decisions(run_id)) == 4
+
+        # 覆盖：picks 只剩最后一次那一份，不随重跑累积。
+        picks = store.all_picks()
+        assert len(picks) == 1, f"picks 累积了 {len(picks)} 行，回测净值会成倍虚高"
+        # picks 刻意不带 run_id：加了就破坏「每个交易日一份不重叠」的去重保证。
+        assert "run_id" not in set(picks.columns)
+
+
+def test_failed_run_id_cannot_be_reused_for_a_new_batch(tmp_path):
+    """失败批次的 run_id 不可复用：它的元数据不可信，重跑必须换新 run_id。
+
+    允许复用会让一个 run_id 先记失败、后记成功，台账上分不清那次到底成没成。
+    """
+    with Store(tmp_path / "failed-reuse.duckdb") as store:
+        store.create_experiment_run(_run_row("doomed"))
+        store.fail_experiment_run(
+            "doomed",
+            "2026-08-04T15:40:00+08:00",
+            json.dumps({"message": "上游断流"}),
+        )
+
+        with pytest.raises(ValueError, match="失败实验批次不可复用"):
+            store.record_experiment(_run_row("doomed"), _decisions("doomed"))
+
+        assert store.experiment_run("doomed")["status"] == "failed"
+        assert len(store.experiment_decisions("doomed")) == 0
+
+
 def test_missing_task_rolls_back_experiment_success(tmp_path):
     with Store(tmp_path / "atomic-rollback.duckdb") as store:
         store.create_experiment_run(_run_row("atomic-rollback"))
@@ -595,8 +665,11 @@ def test_entries_awaiting_limits_only_lists_unsettled_succeeded_decisions(tmp_pa
             [
                 # 买到了：entry_price 有值即为终局。
                 _returns_row("done", "rule", "000001.SZ", entry_price=10.0, status="filled"),
-                # 买不到：封板或买入日没有 K 线，同样是终局。
+                # 买不到：封板是市场事实，终局。
                 _returns_row("done", "ai", "000002.SZ", status="entry_unavailable"),
+                # 买入日没有 K 线：**不是**终局。每轮扫描只回补当轮候选池的日线，
+                # 更早批次的票在后续买入日整片缺行，补上日线后仍要重算，
+                # 所以必须继续出现在待补清单里。
                 _returns_row("done", "hybrid", "000003.SZ", status="entry_bar_missing"),
                 # 还没定：只有 pending_entry，需要继续补涨跌停价。
                 _returns_row("done", "benchmark", "000004.SZ", status="pending_entry"),
@@ -612,7 +685,13 @@ def test_entries_awaiting_limits_only_lists_unsettled_succeeded_decisions(tmp_pa
                 "as_of": "20260804",
                 "group_name": "benchmark",
                 "ts_code": "000004.SZ",
-            }
+            },
+            {
+                "run_id": "done",
+                "as_of": "20260804",
+                "group_name": "hybrid",
+                "ts_code": "000003.SZ",
+            },
         ]
 
 
@@ -663,6 +742,8 @@ def test_entry_status_classification_and_predicate_share_one_contract():
         classify_entry_status([{"entry_price": None, "status": "entry_unavailable"}])
         == "entry_unavailable"
     )
+    # 买入日没有 K 线是可修复的数据缺口，不是「买不到」。混进终局会让这些样本
+    # 在补齐日线后也不再重算，收益永远算不出来。
     assert (
         classify_entry_status(
             [
@@ -670,7 +751,7 @@ def test_entry_status_classification_and_predicate_share_one_contract():
                 {"entry_price": None, "status": "entry_bar_missing"},
             ]
         )
-        == "entry_unavailable"
+        == "pending_entry"
     )
     assert (
         classify_entry_status([{"entry_price": None, "status": "pending_entry"}])

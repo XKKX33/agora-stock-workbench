@@ -206,7 +206,10 @@ class AgentDataMixin:
                 pct_5d = round((closes.iloc[-1] / closes.iloc[-6] - 1) * 100, 2)
             if len(closes) >= 21:
                 pct_20d = round((closes.iloc[-1] / closes.iloc[-21] - 1) * 100, 2)
-            macd_state = AgentDataMixin._macd_state(closes)
+            # 和上面 pct_5d/pct_20d 一样要看够不够样本:dif 要 26 根、dea 再要 9 个 dif,
+            # 不足 34 根算出的"零轴上红柱"是预热噪音,喂给模型等于给它一个假事实。
+            if len(closes) >= 34:
+                macd_state = AgentDataMixin._macd_state(closes)
         return {
             "ts_code": row["ts_code"],
             "name": row["name"] if pd.notna(row["name"]) else "",
@@ -291,7 +294,13 @@ class AgentDataMixin:
         closes = history["close"].astype(float)
         highs = history["high"].astype(float)
         lows = history["low"].astype(float)
-        ma = {f"ma{n}": _round(float(closes.tail(n).mean()), 2) for n in (5, 10, 20, 60)}
+        n_bars = len(closes)
+        # 样本不够就不给数。tail(60).mean() 在只有 9 根时会算出 9 根的均值却仍叫 ma60,
+        # 数值看着正常、含义是错的——这种字段喂给模型比缺字段危险得多。
+        ma = {
+            f"ma{n}": _round(float(closes.tail(n).mean()), 2) if n_bars >= n else None
+            for n in (5, 10, 20, 60)
+        }
 
         ema12 = closes.ewm(span=12, adjust=False).mean()
         ema26 = closes.ewm(span=26, adjust=False).mean()
@@ -328,17 +337,20 @@ class AgentDataMixin:
         ]
         return {
             "ma": ma,
+            # 26 日 EMA 叠 9 日 DEA:35 根之前都是预热,不是指标
             "macd": {
-                "dif": _round(float(dif.iloc[-1]), 3),
-                "dea": _round(float(dea.iloc[-1]), 3),
-                "hist": _round(float(hist.iloc[-1]), 3),
+                "dif": _round(float(dif.iloc[-1]), 3) if n_bars >= 26 else None,
+                "dea": _round(float(dea.iloc[-1]), 3) if n_bars >= 34 else None,
+                "hist": _round(float(hist.iloc[-1]), 3) if n_bars >= 34 else None,
             },
             "kdj": {
-                "k": _round(float(k.iloc[-1]), 2),
-                "d": _round(float(d.iloc[-1]), 2),
-                "j": _round(float(j.iloc[-1]), 2),
+                "k": _round(float(k.iloc[-1]), 2) if n_bars >= 9 else None,
+                "d": _round(float(d.iloc[-1]), 2) if n_bars >= 9 else None,
+                "j": _round(float(j.iloc[-1]), 2) if n_bars >= 9 else None,
             },
-            "rsi6": _round(float(rsi6.iloc[-1]), 2) if pd.notna(rsi6.iloc[-1]) else None,
+            "rsi6": _round(float(rsi6.iloc[-1]), 2)
+            if n_bars >= 6 and pd.notna(rsi6.iloc[-1])
+            else None,
             "boll": {
                 "upper": _round(float(mid.iloc[-1] + 2 * std.iloc[-1]), 2) if pd.notna(std.iloc[-1]) else None,
                 "mid": _round(float(mid.iloc[-1]), 2),
@@ -346,10 +358,10 @@ class AgentDataMixin:
             },
             "recent_5": recent_5,
             "range_20": {
-                "high": _round(float(highs.tail(20).max()), 2),
-                "low": _round(float(lows.tail(20).min()), 2),
+                "high": _round(float(highs.tail(20).max()), 2) if n_bars >= 20 else None,
+                "low": _round(float(lows.tail(20).min()), 2) if n_bars >= 20 else None,
                 "pct_20d": _round((closes.iloc[-1] / closes.iloc[-21] - 1) * 100, 2)
-                if len(closes) >= 21
+                if n_bars >= 21
                 else None,
             },
         }
@@ -374,6 +386,10 @@ class AgentDataMixin:
             }
             for (w, c), (_, p) in zip(weeks.items(), pcts.items())
         ]
+        # 周线 MACD 和日线同口径:dif 要 26 根周线、dea 再要 9 个 dif,即 34 周
+        # (约 8 个月日线)。样本不够只给周涨跌,不给"周线多头/空头"结论。
+        if len(weekly) < 34:
+            return {"last_6": last_6, "macd_dif": None, "macd_dea": None, "trend": None}
         ema12 = weekly.ewm(span=12, adjust=False).mean()
         ema26 = weekly.ewm(span=26, adjust=False).mean()
         dif = ema12 - ema26
@@ -381,7 +397,12 @@ class AgentDataMixin:
         trend = "周线多头" if dif.iloc[-1] > dea.iloc[-1] > 0 else (
             "周线空头" if dif.iloc[-1] < dea.iloc[-1] < 0 else "周线修复中"
         )
-        return {"last_6": last_6, "macd_dif": _round(float(dif.iloc[-1]), 3), "macd_dea": _round(float(dea.iloc[-1]), 3), "trend": trend}
+        return {
+            "last_6": last_6,
+            "macd_dif": _round(float(dif.iloc[-1]), 3),
+            "macd_dea": _round(float(dea.iloc[-1]), 3),
+            "trend": trend,
+        }
 
     @staticmethod
     def _moneyflow_brief(frame: pd.DataFrame) -> dict:

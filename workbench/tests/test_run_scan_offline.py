@@ -262,6 +262,32 @@ def test_legacy_output_preserves_stock_feature_contract():
             "score",
         } <= set(row)
         assert "run_date" not in row
+def test_scan_progress_callback_receives_real_stages(monkeypatch):
+    from engine import run_scan as module
+
+    events = []
+    from types import SimpleNamespace
+
+    events = []
+    prepared = SimpleNamespace(candidates=["A", "B"])
+
+    monkeypatch.setattr(module, "prepare_scan_data", lambda **kwargs: prepared)
+    monkeypatch.setattr(module, "validate_scan_integrity", lambda value: {"candidate_count": 2})
+    monkeypatch.setattr(module, "score_prepared_scan", lambda value, record=True: "result")
+
+    result = module.run_scan(
+        strategy_name="strong_mainup",
+        online=False,
+        db_path="unused.duckdb",
+        record=False,
+        as_of="20260817",
+        on_progress=lambda **event: events.append(event),
+    )
+
+    assert result == "result"
+    assert events[0]["stage"] == "prepare"
+    assert events[-1]["stage"] == "score"
+    assert all(event["step"] <= event["total"] for event in events)
 
 
 def _run_all():

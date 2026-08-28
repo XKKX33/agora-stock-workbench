@@ -207,12 +207,13 @@ class PiFinalItem(_StrictModel):
     rebuttal: str = Field(min_length=1)
     risk_control: str = Field(min_length=1)
 
-    @field_validator("score")
-    @classmethod
-    def _score_range(cls, value: float) -> float:
-        if not math.isfinite(value) or not 0 <= value <= 100:
-            raise ValueError("score 必须是 0~100 的有限数字")
-        return value
+
+class PiFinalPick(_StrictModel):
+    """最终决策人对每只入选股的选择记录。"""
+
+    ts_code: str = Field(min_length=1)
+    rank: int = Field(ge=1)
+    reason: str = Field(min_length=1)
 
 
 class PiUsage(_StrictModel):
@@ -247,6 +248,7 @@ class PiJudgmentResult(_StrictModel):
     coarse: list[PiCoarseItem]
     deep: list[PiDeepItem]
     final: list[PiFinalItem]
+    picks: list[PiFinalPick] = Field(default_factory=list)
     usage: PiUsage | None = None
 
     @field_validator("candidate_hash", "input_hash", mode="before")
@@ -307,6 +309,19 @@ def validate_judgment_result(
     coarse = _validate_stage(result.coarse, "coarse", frozen)
     deep = _validate_stage(result.deep, "deep", coarse)
     final = _validate_stage(result.final, "final", deep)
+    # 最终决策人的 picks 必须指向 final 里已有的股票,不许凭空出现。
+    final_codes = {item.ts_code for item in result.final}
+    pick_codes: set[str] = set()
+    previous_rank = 0
+    for pick in result.picks:
+        if pick.ts_code not in final_codes:
+            raise PiAgentValidationError(f"picks 引用了 final 之外的股票: {pick.ts_code}")
+        if pick.ts_code in pick_codes:
+            raise PiAgentValidationError(f"picks 重复引用 {pick.ts_code}")
+        pick_codes.add(pick.ts_code)
+        if pick.rank != previous_rank + 1:
+            raise PiAgentValidationError("picks rank 必须从 1 连续递增")
+        previous_rank = pick.rank
     if request.mode == "batch":
         limits = request.limits
         if len(result.coarse) > limits.coarse:
@@ -318,7 +333,6 @@ def validate_judgment_result(
     elif any(count > 1 for count in (len(result.coarse), len(result.deep), len(result.final))):
         raise PiAgentValidationError("single 每个阶段最多返回 1 只")
     return result
-
 
 __all__ = [
     "PiAgentRequest", "PiAgentValidationError", "PiAnalyst", "PiCoarseItem",

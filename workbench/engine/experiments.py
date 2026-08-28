@@ -168,6 +168,11 @@ def _validated_agent_rows(
         output.append(normalized)
     return output
 
+# 名单语义(用户确认):最终决策人必须给满 N 只,哪怕全部看空——按评分选
+# 相对最优,收益对比数据才能持续积累。全看空期的 AI 组代表"相对最优"而非
+# "该买",解读收益对比时要记得这一点。
+
+
 
 def _scan_reason(row: Mapping[str, Any]) -> str | None:
     reason: dict[str, Any] = {}
@@ -276,7 +281,16 @@ def build_experiment_decisions(
         )
         decisions.append(decision)
 
-    if deep_rows:
+    # 混合组的 AI 那一半必须来自**辩论评分**，也就是 final 的 score。
+    #
+    # 原先这里用 deep_rows，而 deep 阶段的 score 就是候选传入的规则分（Pi 侧
+    # `deep.push({... score: item.score ...})`，item 来自 coarse），辩论评分只存在于
+    # final。结果 ai_percentile 和 rule_percentile 恒等，加权等于没加——线上实测
+    # hybrid 三只与 rule 三只完全相同、ai_score == rule_score，混合组退化成规则组副本，
+    # 三组对比里有两组是同一个东西。
+    #
+    # 只有辩成的股票有辩论评分。没辩成的不进混合组：给它们补一个分数就是编造 AI 判断。
+    if final_rows:
         hybrid = pd.DataFrame(
             [
                 {
@@ -285,7 +299,7 @@ def build_experiment_decisions(
                     "ai_score": item["score"],
                     "agent_item": item,
                 }
-                for item in deep_rows
+                for item in final_rows
             ]
         )
         hybrid["rule_percentile"] = hybrid["rule_score"].rank(
@@ -309,7 +323,9 @@ def build_experiment_decisions(
                 rank=rank,
                 ai_score=float(item["ai_score"]),
                 hybrid_score=float(item["hybrid_score"]),
-                reason_json=_agent_reason(agent_item, final=False),
+                # 数据源已从 deep 换成 final，理由字段也必须按 final 取
+                # （thesis/verdict/action），否则 points/analysts 一个都不存在，理由恒空。
+                reason_json=_agent_reason(agent_item, final=True),
                 risk_json=_strict_json(agent_item.get("risks")),
             )
             decisions.append(decision)
@@ -359,6 +375,49 @@ def required_entry_limit_dates(store: Any, exchange: str = "SSE") -> list[str]:
     return sorted(needed)
 
 
+def required_entry_bar_codes(
+    store: Any, exchange: str = "SSE"
+) -> tuple[list[str], str | None]:
+    """列出已到买入日、却缺当日日线的股票,以及需要覆盖的最早买入日。
+
+    和 ``required_entry_limit_dates`` 对称,但补的是日线本身而不是涨跌停价。
+
+    本项目每轮扫描只为**当轮候选池**回补日线(见 ``run_scan._backfill_history``),
+    全市场截面只覆盖扫描当天。于是更早批次的票在后续买入日整片缺行:实测
+    20260721 全市场只入库 1019 行,而前一个交易日有 5524 行。缺行的票会被判成
+    ``entry_bar_missing``,收益永远算不出。回填收益前必须先把这些票的日线补上。
+
+    返回 ``(股票列表, 最早买入日)``。无需补采时返回 ``([], None)``。
+    """
+    rows = store.experiment_entries_awaiting_limits()
+    if rows.empty:
+        return [], None
+    data_max = store.latest_date()
+    if data_max is None:
+        return [], None
+
+    entry_dates: dict[str, str | None] = {}
+    needed: dict[str, str] = {}
+    for _, row in rows.iterrows():
+        as_of = row["as_of"]
+        if as_of not in entry_dates:
+            entry_dates[as_of] = store.sessions_after(exchange, as_of, 1)
+        entry_date = entry_dates[as_of]
+        # 买入日还没走到已入库范围:这是"等未来",补采解决不了,跳过。
+        if entry_date is None or entry_date > data_max:
+            continue
+        ts_code = row["ts_code"]
+        if store.close_on(ts_code, entry_date) is not None:
+            continue
+        # 同一只票可能在多个批次缺行,取最早那个买入日当补采起点。
+        previous = needed.get(ts_code)
+        if previous is None or entry_date < previous:
+            needed[ts_code] = entry_date
+    if not needed:
+        return [], None
+    return sorted(needed), min(needed.values())
+
+
 def _up_limit(store: Any, ts_code: str, trade_date: str) -> float | None:
     row = store.con.execute(
         """
@@ -379,5 +438,6 @@ def _up_limit(store: Any, ts_code: str, trade_date: str) -> float | None:
 __all__ = [
     "candidate_pool_hash",
     "build_experiment_decisions",
+    "required_entry_bar_codes",
     "required_entry_limit_dates",
 ]

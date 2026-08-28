@@ -10,6 +10,7 @@ from app.config import AppSettings
 from app.main import create_app
 from engine.db import Store
 from engine.run_scan import run_scan
+from engine.visibility import DEFAULT_DELAY_SESSIONS
 from tests.test_run_scan_offline import _seed_db
 
 
@@ -52,16 +53,10 @@ def wait_for_job(client: TestClient, job_id: str, timeout: float = 5.0) -> dict:
 
 
 import copy
+import sys
 
-import app.services.agents as agents_mod
-import app.services.ai as ai_service_mod
-import app.services.news_collect as news_collect_mod
-import app.services.pipelines as pipelines_mod
-import app.services.scans as scans_mod
-import engine.close_pipeline as close_pipeline_mod
 import engine.config as engine_config
 import engine.ml.registry as ml_registry
-import engine.run_scan as run_scan_mod
 
 
 @pytest.fixture(autouse=True)
@@ -91,11 +86,25 @@ def offline_settings(monkeypatch):
     上一旦导出过这个变量,"没配凭据要报 unconfigured"的用例就会翻红,更糟的
     是 AI 复盘用例会真的去打模型接口。所以按配置里声明的变量名逐个删掉——
     需要配好凭据的用例自己 setenv,夹具先跑,不会被覆盖。
+
+    隐藏窗口(visibility_delay_sessions)也必须钉死在代码默认值上。它是**运营
+    可调参数**:舆情源只能采实时数据,生产上可能把它调成 0 让选股截面与舆情
+    对齐。可这批用例的存在意义就是验证"隐藏窗口内的日期必须被拒"——delay 为 0
+    时窗口是空的,断言无事可验、静默空转,闸门坏了也发现不了。需要别的 delay
+    的用例自己覆盖这个键。
     """
     isolated = copy.deepcopy(engine_config.load_settings())
     news = isolated.setdefault("news", {})
     news["enabled"] = False
     news["sources"] = []
+    data = isolated.setdefault("data", {})
+    data["visibility_delay_sessions"] = DEFAULT_DELAY_SESSIONS
+    # 先抓原函数引用:下面要靠身份比较认出"从 engine.config 导入过来的同一个
+    # 函数",一旦 engine_config 上的名字先被换掉,比较就全部落空。
+    originals = {
+        attr: getattr(engine_config, attr)
+        for attr in ("load_settings", "load_settings_with_local")
+    }
     # 同时隔离"本地覆盖 settings.local.yaml",避免开发机上的 UI 设置污染测试
     monkeypatch.setattr(engine_config, "load_settings", lambda: isolated)
     monkeypatch.setattr(engine_config, "load_settings_with_local", lambda: isolated)
@@ -104,17 +113,20 @@ def offline_settings(monkeypatch):
             (isolated.get(section) or {}).get("api_key_env") or ""
         ).strip() or "WORKBENCH_AI_API_KEY"
         monkeypatch.delenv(env_name, raising=False)
-    for module in (
-        close_pipeline_mod,
-        run_scan_mod,
-        news_collect_mod,
-        pipelines_mod,
-        scans_mod,
-        ai_service_mod,
-        agents_mod,
-    ):
-        if hasattr(module, "load_settings"):
-            monkeypatch.setattr(module, "load_settings", lambda: isolated)
-        if hasattr(module, "load_settings_with_local"):
-            monkeypatch.setattr(module, "load_settings_with_local", lambda: isolated)
+    # 模块清单不手写:`from engine.config import load_settings` 会在导入方模块里
+    # 复制一份名字绑定,补 engine.config 上的原名对它无效。手写清单漏一个模块就
+    # 静默读回真实配置——之前 app.services.returns / reviews 就是这么漏掉的。
+    # 测试模块自己也算:有用例调 load_settings() 算期望值,读的必须是同一份隔离
+    # 配置,否则期望值按真配置算、接口按隔离配置跑,断言比的是两套口径。
+    # 设置读写模块是"被测对象"而不是配置消费者:/api/settings 的用例要写进临时
+    # 目录再读回来验证往返。冻成静态字典的话它永远读不到自己刚写的值。它自己
+    # 已经把 CONFIG_DIR / LOCAL_FILE 指到 tmp,不需要这里再隔离。
+    for name, module in list(sys.modules.items()):
+        if module is None or name in ("engine.config", "app.services.settings_store"):
+            continue
+        if not name.startswith(("app.", "engine.", "tests.")):
+            continue
+        for attr, original in originals.items():
+            if getattr(module, attr, None) is original:
+                monkeypatch.setattr(module, attr, lambda: isolated)
     return isolated

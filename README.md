@@ -1,8 +1,8 @@
-# Hermes 股票量化工作台
+# AGORA 股票量化工作台
 
 ## 项目简介
 
-从 Hermes 股票分析技能迁出的本地量化工作台。当前具备 A 股数据入库、候选池筛选、因子计算、综合打分、资金确认、选股台账、独立实验收益验证、九步收盘工作流、舆情存储与带标注复盘、K 线行情与全市场筛选、滚动回测与因子机器学习体检，以及一套动态读取真实数据的十四页面界面。界面为蓝紫渐变科技感主题：行情页支持自选股（添加/管理/按代码名称与行业筛选，点击即跳 K 线），独立自选页集中管理自选与行情，情绪页提供行业资金流向（按最新资金流交易日聚合，涨红跌绿，附覆盖区间说明），选股台保留 AI Agent 启动与配置入口，p13 提供公开通话、SSE 实时事件和历史收益报告。
+从 Hermes 股票分析技能迁出的本地量化工作台。当前主流程固定为三步：方法论选股初筛、对应板块舆情抓取、多 Agent 多方辩论输出候选结论。另具备 A 股数据入库、收益验证、复盘、K 线行情、全市场筛选、滚动回测与因子机器学习体检。界面收敛为六个工作入口：总览、方法论选股、板块舆情、多 Agent 辩论、自选与行情、设置；页面数据全部来自 DuckDB 实时查询。
 
 当前状态是**可运行的本地闭环**：FastAPI 服务同时提供接口和页面，页面数据全部来自 DuckDB 实时查询。
 
@@ -14,11 +14,12 @@
 - DuckDB：单文件保存行情、资金流、交易日历、选股台账、任务状态与舆情。
 - Tushare：联网更新 A 股行情、交易日历与资金流。
 - FastAPI + Uvicorn：接口层与页面托管。
-- HTML/CSS/原生 JavaScript + ECharts：十四个工作台页面（总览、选股台、情绪、流程、因子、台账、行情 K 线、舆情、AI 复盘、回测、自选、AI Agent、设置、Agent 报告），Figma 风格暗色主题（圆角分块、柔和阴影、丝滑动效），缺数据一律按三态显示，不补零。
+- HTML/CSS/原生 JavaScript + ECharts：六个工作台入口；统一任务面板显示后台阶段、日志、进度和终态，缺数据一律按三态显示，不补零。
 - `app/services/kline.py`：个股搜索与 K 线指标计算（MA / MACD / KDJ / RSI / BOLL），全部在后端算出、前端只画图。
 - `app/services/screener.py`：全市场横截面筛选，支持涨跌幅、量比、行业过滤与排序分页。
 - `app/services/watchlist.py`：自选股维护与行情列表（搜索/行业/排序筛选，添加移除幂等，股票不存在返回 404 而不是静默吞掉）。
-- `engine/agents.py` + `app/services/agents.py` + `app/api/agents.py`：多 agent 短线研判（粗筛 → 三分析师 → 方法论/舆情/走势公开消息交接 → 多空辩论 → 风控），公开结构化事件写入 `agent_events`，结果落 `agent_runs` / `agent_judgments` 表。
+- `engine/methodology.py`：短线方法论正文与七个角色职责的**唯一来源**，随每次请求下发给 Pi Agent；改方法论只改这一处。
+- `engine/agents.py` + `app/services/agents.py` + `app/api/agents.py`：多 agent 短线研判（粗筛 → 三分析师 → 方法论/舆情/走势公开消息交接 → 多空辩论 → 风控），公开结构化事件写入 `agent_events`，结果落 `agent_runs` / `agent_judgments` 表；前端把选股批次 `run_id`、信号日和通过候选显式传入，后端按指定批次冻结输入。
 - `engine/returns.py` + `app/services/returns.py` + `app/api/returns.py`：独立 `experiment_returns` 收益验证，提供 `t1_close` 与 `t2_open`…`t10_open` 详情和汇总；不改写旧 `picks.ret1/ret3/ret5/ret10` 口径。
 - `engine/visibility.py`：防前视日期闸门，统一算出当前允许用于选股、研判、实验与收益验证的最新可见交易日。
 - `engine/backtest.py` + `app/services/backtest.py` + `app/api/backtest.py`：滚动回测与多策略对比（净值曲线、回撤、胜率、换手、成本假设、覆盖率），默认非重叠调仓口径。
@@ -35,26 +36,31 @@ cd C:\Users\xuan\Desktop\桌面\股票\workbench
 启动工作台（一条命令，接口与页面同一进程）：
 
 ```powershell
-C:\Users\xuan\anaconda3\python.exe serve.py --port 8788
+C:\Users\xuan\anaconda3\python.exe serve.py
 ```
 
 启动后：
 
-- 工作台页面 <http://127.0.0.1:8788>
-- 接口文档 <http://127.0.0.1:8788/docs>
+- 工作台页面 <http://127.0.0.1:8765>
+- 接口文档 <http://127.0.0.1:8765/docs>
 
-注意：默认端口 8765 在本机被 Codex WebUI 占用，工作台固定用 **8788**（8765 不要动）。`serve.py` 启动时先加载已被 Git 忽略的 `workbench/.env`，再报告数据库状态；显式进程环境变量优先。**数据库文件不存在时不会自动建空库**，只打印警告——凭空造空库会把「还没采过数据」伪装成「有库但全空」。
+端口默认 **8765**（`app/config.py` 的 `AppSettings.port`）。若本机该端口已被别的程序占用，加 `--port 8788` 换一个，页面地址同步改成新端口。`serve.py` 启动时先加载已被 Git 忽略的 `workbench/.env`，再报告数据库状态；显式进程环境变量优先。**数据库文件不存在时不会自动建空库**，只打印警告——凭空造空库会把「还没采过数据」伪装成「有库但全空」。
 
 其他入口：
 
 ```powershell
-python -m engine.run_scan --offline        # 只用本地数据跑一次扫描（截面自动取可见日）
-python -m engine.run_scan --trade-date 20260706   # 指定截面交易日（必须 <= 可见日，否则拒绝执行）
-python -m engine.close_pipeline            # 手动执行一次收盘后任务链（截面=可见日）
-python -m engine.postmortem                # 回填 T+N 收益并做 IC 自检（只回填到可见日）
-python -m engine.review --trade-date 20260706   # 查看某交易日的复盘（必须 <= 可见日）
-python tools/train_ml.py --dry-run         # 因子体检训练（采样截止日自动取可见日）
+# 六个入口都必须用 anaconda 全路径：裸 `python` 在本机指向无关的 venv，不保证依赖齐全。
+$py = "C:\Users\xuan\anaconda3\python.exe"
+
+& $py -m engine.run_scan --offline                  # 只用本地数据跑一次扫描（截面自动取可见日）
+& $py -m engine.run_scan --trade-date 20260706      # 指定截面交易日（必须 <= 可见日，否则拒绝执行）
+& $py -m engine.close_pipeline --offline            # 手动执行一次收盘后任务链（截面=可见日）
+& $py -m engine.postmortem                          # 回填 T+N 收益并做 IC 自检（只回填到可见日）
+& $py -m engine.review --trade-date 20260706        # 查看某交易日的复盘（必须 <= 可见日）
+& $py tools/train_ml.py --dry-run                   # 因子体检训练（采样截止日自动取可见日）
 ```
+
+`close_pipeline` 支持 `--db` 指向别的 DuckDB 文件，想先在副本上试跑就用它。
 
 ## 配置
 
@@ -90,15 +96,23 @@ Agent 公开事件可通过 `GET /api/agents/jobs/{job_id}/events?after_seq=0&li
 ## 测试
 
 ```powershell
-C:\Users\xuan\anaconda3\python.exe -m pytest tests -q --import-mode=importlib --basetemp=.pytest-tmp-all -p no:cacheprovider
+cd C:\Users\xuan\Desktop\桌面\股票\workbench
+C:\Users\xuan\anaconda3\python.exe -m pytest tests -q
+```
+
+Pi Agent（TypeScript）侧：
+
+```powershell
+cd C:\Users\xuan\Desktop\桌面\股票\workbench\pi_agent
+npm test
 ```
 
 注意（本机环境约束）：
 
-- 唯一可用 Python 是 `C:\Users\xuan\anaconda3\python.exe`（无 venv，禁止新建环境）。
-- 必须加 `--import-mode=importlib`：`tests/` 与 `tests/api/` 存在同名文件（`test_ai.py`、`test_news.py`），默认模式会冲突。
-- 必须加 `--basetemp=项目内目录`：系统 Temp 目录权限被拒；每次用独立名字（如 `.pytest-tmp-all`、`.pytest-tmp-all2`）。
-- 测试全部使用 `tmp_path` 隔离数据库，不会读写 `data/market.duckdb`。
+- 唯一可用 Python 是 `C:\Users\xuan\anaconda3\python.exe`（无 venv，禁止新建环境）；裸 `python` 在本机指向无关的 venv。
+- `--import-mode=importlib` 已写进 `pytest.ini` 的 `addopts`，不用手加：`tests/` 与 `tests/api/` 存在同名文件（`test_ai.py`、`test_news.py`），默认 prepend 模式会冲突。
+- 必须从 `workbench/` 目录运行：`pytest.ini` 的 `testpaths` 与 `pythonpath` 都相对它。
+- 测试全部使用 `tmp_path` 隔离数据库，不会读写 `data/market.duckdb`；Pi Agent 相关用例现取空闲端口，本机开着工作台也能跑。
 - 接口测试会自己删掉 `ai` / `agent` 段 `api_key_env` 声明的凭据环境变量（默认 `WORKBENCH_AI_API_KEY`）：「未配置要报错」的用例不受开发机环境影响，也不会真的去打模型接口。
 
 ## 搜索记录
@@ -124,8 +138,7 @@ C:\Users\xuan\anaconda3\python.exe -m pytest tests -q --import-mode=importlib --
 - 带三级标注的复盘装配：`fact`（事实）/ `derived`（规则计算结果）/ `unverified`（待验证判断）。
 - 行情 K 线页：个股搜索、日 K 图（MA5/10/20/60、MACD、KDJ、RSI、BOLL），后端算指标、前端只渲染。
 - 全市场筛选接口：`GET /api/screener`，涨跌幅/量比/行业过滤、多字段排序、分页。
-- 十四页面动态读取真实数据，缺数据显示为缺失而不是补零；Figma 风格暗色主题（统一圆角令牌、柔和阴影、卡片入场动效），侧栏共享数据链路状态条（舆情/复盘/AI 三态）。
-- Agent 公开事件与报告：`agent_events` 保存可审计的结构化消息与序号；`/api/agents/jobs/{id}/events` 支持历史分页，`/api/agents/jobs/{id}/stream` 支持 SSE 断点续传；p13 展示批次状态、公开辩论和收益验证。
+- 六入口页面动态读取真实数据；方法论选股、板块舆情和多 Agent 页面共享当前工作上下文，刷新后可恢复扫描/采集/研判任务，候选批次不会静默切换到另一批次。
 - 独立收益验证：`experiment_returns` 按 `(run_id, group_name, ts_code, horizon)` 幂等保存 `t1_close`、`t2_open`…`t10_open`，汇总明确区分可测、缺失和真实零收益。
 - 实验台账收敛为一份口径（2026-08-10）：`experiment_decisions` 只存决策（11 列），成交价与各期收益只存 `experiment_returns`；`GET /api/experiments` 每行挂 `entry_status` 与 `returns.{horizon}`，汇总统一走 `GET /api/returns/summary`（原 `/api/experiments/summary` 已删除）。顺带修掉一个真实错误:涨停封板或缺涨跌停价时旧代码仍把开盘价写进 `entry_price`，导致「到底买到没买到」分不清；现在只有真的买到才有成交价。回测与复盘用的 `picks.ret1/ret3/ret5/ret10` 是另一条链路，未受影响。
 - `picks` 主键已对齐业务幂等键 `(as_of, strategy, ts_code)`：旧库启动时自动迁移去重，保留最新 `run_date`。
@@ -146,7 +159,6 @@ C:\Users\xuan\anaconda3\python.exe -m pytest tests -q --import-mode=importlib --
 ## 待办事项
 
 - 完成舆情来源合规调研并注册更多采集器（newsnow 等来源待补）；舆情正文级定向采集调研完成后，把真实新闻正文喂给舆情分析师。
-- 页面固定 `run_id` 与数据截止时间的能力。
 - 回测成本口径：买卖不对称暂未建模（印花税 5bp 只在卖出端，现按单一 `cost_bps` 对换手部分双边计价）。换手率已改为等权权重变化口径 `sum|w_new - w_old| / 2`。
 
 
@@ -171,3 +183,25 @@ C:\Users\xuan\anaconda3\python.exe -m pytest tests -q --import-mode=importlib --
 - Agent 对 20 只候选逐只严格校验，2 只非法输出被记录并排除，18 只有效结果继续完成辩论，最终选出 3 只。没有把纯文本或非法字段合成为有效结论。
 - 真实库已落下规则 3、AI 3、混合 3、基准 20；实验、Agent、扫描记录均为 `succeeded`，错误字段为空。
 - 最终全量测试 **759 passed / 0 failed**；Pi Agent 测试 **17 passed / 0 failed**，类型检查通过，页面脚本 **18 passed / 0 failed**。
+
+## 2026-08-23 辩论链路改造收尾
+
+- **混合组不再是规则组副本**：原先它的「AI 那一半」取的是深度分析阶段的分数，而那个分数就是
+  规则分本身，加权等于没加——实测混合组选出的三只与规则组完全相同。现改用辩论评分。
+- **AI 说「看空」的股票不再进买入名单**：这些名单会按次日开盘买入回填收益，拿去和规则组比谁
+  赚得多。把模型明确说「别买」的股票记成买入，那组数字什么都不代表。全部看空时如实给空名单，
+  不凑数、不报错——「都不该追」本身就是有效结论。
+- **进度条不再提前跑满**：排序环节删除后 20 只全部参辩，总步数按全部候选算。
+- 真实流程实跑三次验证：修复前 AI 组前三里 2 只是看空的（缺陷复现）；修复后 20 只全判看空，
+  只落规则 3 / 基准 20，`agents` 步如实记「最终 0/3」；换信号日再跑一次拿到 1 只看多，AI 组与
+  混合组各落 1 行且 `ai_score` 是辩论分不是规则分——买入路径也验证过了，不只验证了空名单。
+- 历史 6 个批次里 17 条「看空 / 中性」落在买入组的脏决策已按确认清理（删决策 34 行、收益 340 行，
+  规则与基准全保留），删前备份 `data/market.duckdb.bak-20260824-002814`。
+- **辩论矩阵不再拼接不同股票**：浏览器逐屏核对时发现，Agent 看板一屏六格看起来是一场完整
+  辩论，实际方法论/舆情/走势讲一只、多方讲另一只、空方与反驳讲第三只——20 只候选共用同一批
+  角色名，渲染时后跑完的覆盖了先跑完的，页面毫无异常迹象。现在看板加了「研判股票」选择器，
+  选哪只就只显示那只的六格与风控结论；总览页每格加代码前缀标明归属。
+- **台账能分清每一次的入选结果**：同一信号日可以跑多次（实测 8/21 一天跑了 6 次），原先全挤
+  在一条「信号日」分隔线下，同一只票重复出现却看不出区别。现在每批一条分隔线写明运行时刻与
+  批次号，信号日下方也标运行时间；筛选栏新增「运行批次」下拉框，选一次就只看那一次。
+- 测试基线：Python **895 passed / 0 failed**；Pi Agent **33 passed / 0 failed**，类型检查通过。

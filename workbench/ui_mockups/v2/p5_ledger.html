@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>台账复盘 · Hermes Quant</title>
+  <title>台账复盘 · AGORA Quant</title>
   <link rel="stylesheet" href="/assets/css/theme.css">
   <link rel="icon" href="data:,">
 </head>
@@ -13,12 +13,14 @@
     <main class="main-shell">
       <div id="error-banner" class="error-banner" role="alert"></div>
       <header class="page-header">
-        <div><div class="eyebrow">Experiment ledger</div><h1>按日期实验台账</h1><p>规则、AI、混合和基准使用同一信号日口径；成交与收益全部来自 experiment_returns。</p></div>
+        <div><div class="eyebrow">Experiment ledger</div><h1>按日期实验台账</h1><p>规则、AI、混合和基准使用同一信号日口径；成交与收益全部来自 experiment_returns。<strong>同一信号日可以跑多次</strong>，每一次是独立批次，按运行时刻分段；用「运行批次」下拉框可只看某一次。</p>
+        <p class="source-note">本页是<strong>完整历史</strong>：每一次运行都独立留存，重跑不会覆盖旧批次。<a href="p9_backtest.html">组合回测</a>用的是另一张表，每个信号日只保留最新一次名单，因此两页的条数不会一致。</p></div>
         <div class="button-row"><a class="button" href="p13_agent_dashboard.html">Agent 报告</a><button id="refresh" class="button" type="button">刷新</button></div>
       </header>
 
       <form id="ledger-filters" class="filter-bar">
         <label>信号日期<input id="as-of" class="field" type="date"></label>
+        <label>运行批次<select id="run-id" class="field"><option value="">全部批次</option></select></label>
         <label>实验组<select id="group" class="field"><option value="">全部组</option><option value="rule">规则</option><option value="ai">AI</option><option value="hybrid">混合</option><option value="benchmark">基准</option></select></label>
         <label>股票代码<input id="ts-code" class="field mono" type="text" placeholder="000001.SZ" autocomplete="off"></label>
         <label>成交状态<select id="entry-status" class="field"><option value="">全部状态</option><option value="filled">已成交</option><option value="entry_unavailable">无法成交</option><option value="pending_entry">待成交</option></select></label>
@@ -37,7 +39,7 @@
 
       <section class="ledger-section">
         <div class="section-heading"><div><h2>信号记录</h2><p>买入价为下一交易日开盘价；收益列取自 experiment_returns 的 t1_close / t3_open / t5_open / t10_open，算不出的格子显示「—」并给出原因。</p></div></div>
-        <div class="table-wrap"><table><thead><tr><th>信号日</th><th>组别</th><th>排名</th><th>股票</th><th>买入日</th><th>买入价</th><th>成交状态</th><th>T+1 收盘</th><th>T+3 开盘</th><th>T+5 开盘</th><th>T+10 开盘</th><th>待处理原因</th></tr></thead><tbody id="ledger-rows"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>信号日 / 运行时刻</th><th>组别</th><th>排名</th><th>股票</th><th>买入日</th><th>买入价</th><th>成交状态</th><th>T+1 收盘</th><th>T+3 开盘</th><th>T+5 开盘</th><th>T+10 开盘</th><th>待处理原因</th></tr></thead><tbody id="ledger-rows"></tbody></table></div>
         <div class="pagination-bar" aria-label="实验台账翻页">
           <button id="prev-page" class="button icon-button" type="button" aria-label="上一页" title="上一页">←</button>
           <span id="page-label" class="mono">第 1 / 1 页</span>

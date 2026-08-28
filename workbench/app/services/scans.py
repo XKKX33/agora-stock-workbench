@@ -145,21 +145,25 @@ class ScanManager:
         }
 
     def _scan_visible(
-        self, *, strategy: str, online: bool, record: bool, visible_as_of: str
+        self,
+        *,
+        strategy: str,
+        online: bool,
+        record: bool,
+        visible_as_of: str,
+        on_progress=None,
     ) -> ScanResult:
-        """按可见日截面执行一次扫描。
+        """按可见日截面执行一次扫描，并报告真实阶段。"""
+        def emit(stage: str, step: int, message: str) -> None:
+            if on_progress is not None:
+                on_progress(stage=stage, step=step, total=5, message=message)
 
-        在线摄取语义照旧:先向 Tushare 确认最新交易日,把日历和最新截面写进库
-        (原始行情/K 线/总览仍看最新数据,不受可见闸门限制),再用刷新后的基准日
-        重算可见日。只有持续摄取最新交易日,窗口才会往前推。
-
-        评分输入固定 as_of=可见日:显式把日期传进 prepare_scan_data,不再让它
-        自己去确认最新交易日,否则隐藏窗口里的行情又会被拿去打分。
-        """
+        emit("preflight", 1, "配置检查完成，先把规则和股票请到同一张桌子上")
         settings = load_settings()
         client = None
         target = visible_as_of
         if online:
+            emit("market_data", 2, "在线行情准备中，正在确认交易日并给市场数据续杯")
             client = _make_client(settings)
             base, _confirmed_rows = confirm_latest_trade_date(
                 client, int(settings["data"]["min_daily_rows"])
@@ -173,10 +177,11 @@ class ScanManager:
                 window = resolve_window(
                     store, settings, exchange=EXCHANGE, base_session=base
                 )
-            # 在线基准日以 Tushare 确认为准,可见日随之重算;不可用直接上抛,
-            # 由 _run() 落成 failed 并带上原因。
             target = require_visible_as_of(window)
+        else:
+            emit("market_data", 2, f"使用本地市场数据，扫描截面 {target}")
 
+        emit("candidate_pool", 3, "候选池整理完成，开始逐只面试",)
         prepared = prepare_scan_data(
             strategy_name=strategy,
             online=online,
@@ -185,7 +190,10 @@ class ScanManager:
             client=client,
             as_of=target,
         )
+        emit("candidate_pool", 3, f"候选池整理完成：{len(prepared.candidates)} 只，开始逐只面试")
+        emit("integrity", 4, "数据完整性检查开始，缺历史数据的股票先去补课")
         validate_scan_integrity(prepared)
+        emit("score", 5, "因子评分开始，规则裁判已经就位")
         return score_prepared_scan(prepared, record=record)
 
     def _run(
@@ -196,12 +204,17 @@ class ScanManager:
         record: bool,
         visible_as_of: str,
     ) -> None:
-        """后台线程执行扫描,更新 task_runs 状态。
-
-        失败时先落库再原样上抛:任务表留下 failed 与错误详情供 API 查询,
-        同时日志里保留完整堆栈。绝不静默吞掉异常。
-        """
+        """后台线程执行扫描，阶段进度与终态都持久化。"""
         self.tracker.mark_running(task_id)
+
+        def on_progress(*, stage: str, step: int, total: int, message: str) -> None:
+            self.tracker.update_progress(
+                task_id,
+                stage=stage,
+                step=step,
+                total=total,
+                message=message,
+            )
 
         try:
             result = self._scan_visible(
@@ -209,15 +222,13 @@ class ScanManager:
                 online=online,
                 record=record,
                 visible_as_of=visible_as_of,
+                on_progress=on_progress,
             )
         except Exception as error:
             self.tracker.finish(
                 task_id,
                 status="failed",
-                error={
-                    "type": type(error).__name__,
-                    "message": str(error),
-                },
+                error={"type": type(error).__name__, "message": str(error)},
             )
             logger.exception("扫描任务 %s(%s)失败", task_id, strategy)
             raise
@@ -232,9 +243,17 @@ class ScanManager:
                 "candidate_count": result.candidate_count,
                 "scored_count": result.scored_count,
                 "passed_count": result.passed_count,
+                "candidate_codes": [stock.ts_code for stock in result.scored if stock.passed],
                 "final_count": len(result.final),
+                "progress": {
+                    "stage": "complete",
+                    "step": 5,
+                    "total": 5,
+                    "percent": 100,
+                    "message": "扫描完成",
+                    "logs": [],
+                },
             },
-            # 回写真实 as_of:在线抓到更新交易日时校正幂等键
             trade_date=result.as_of,
         )
 

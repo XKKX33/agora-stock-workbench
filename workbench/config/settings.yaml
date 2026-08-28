@@ -9,7 +9,12 @@ data:
   # 隐藏最近 N 个交易日,杜绝前视偏差。选股/Agent/实验/收益一律只能看到
   # "最新已确认交易日往前退 N 个开市日"及更早的数据;请求更新的日期直接拒绝。
   # 0 = 关闭隐藏(等于旧行为)。K 线与行情查询不受影响,仍可看最新。
-  visibility_delay_sessions: 20
+  #
+  # 当前设为 0:舆情源(TrendRadar 热榜)只能采实时数据、无法回溯历史,
+  # 退 20 个交易日会让选股截面永远早于全部舆情,舆情分析师恒定拿到 0 条,
+  # 三步链路的第二步实质空转。关闭后舆情与选股截面对齐在同一交易日。
+  # 代价:收益回测数字不再具备防前视保证,只反映实盘选股口径。
+  visibility_delay_sessions: 0
 
 tushare:
   # token 优先读环境变量 TUSHARE_TOKEN;为空则回退 ts.pro_api() 落盘 token
@@ -40,7 +45,7 @@ ai:
   # AI 盘后复盘叙述。凭据只从环境变量读，不写进本文件。
   enabled: true
   provider: openai_compatible
-  base_url: https://api.pie-xian.com/v1
+  base_url: https://cpa.xuan.christmas/v1
   api_key_env: WORKBENCH_AI_API_KEY
   model: minimax-m3                       # 可在设置页或 settings.local.yaml 编辑
 
@@ -49,13 +54,16 @@ agent:
   # 密钥只从 WORKBENCH_AI_API_KEY 环境变量读取，禁止写入 YAML。
   enabled: true
   provider: openai_compatible
-  model:                                      # 保持可编辑；空值按配置合并规则读取
-  base_url: https://api.pie-xian.com/v1
+  model: minimax-m3
+  base_url: https://cpa.xuan.christmas/v1
   api_key_env: WORKBENCH_AI_API_KEY
   temperature: 0.2
-  # grok-4.5 的长上下文粗筛需在上游约 60 秒响应头期限内完成。
   reasoning_effort: low
-  max_tokens: 1200
+  # 输出预算。推理模型的思考 token 也计入输出，辩论角色还要带完整 transcript
+  # 逐条反驳。实测正文本身只要 1100~1200 tok，但 4096 下 bull 轮仍被截断
+  # （finishReason 为 length，JSON 不完整直接失败），说明思考占了大头。
+  # 取模型硬上限 8192，给思考留足余量；再高模型也不接受。
+  max_tokens: 8192
   # 面板默认参数与硬上限:前端可改,后端按上限钳制
   default_candidates: 20
   default_depth: 20

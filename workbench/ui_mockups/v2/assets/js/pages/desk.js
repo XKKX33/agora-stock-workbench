@@ -2,9 +2,11 @@
 // 候选池来自 /api/stocks（真实扫描结果）；自选股来自 /api/watchlist；行业资金流来自 /api/sentiment
 import { clearError, getWorkContext, initShell, setLoading, setStatus, setWorkContext, showError, workContextParams } from "/assets/js/app-shell.js";
 import { query, request } from "/assets/js/api.js";
+import { createTaskPanel } from "/assets/js/task-panel.js";
 import { escapeHtml, formatDate, formatNumber, formatPercent, statusTag } from "/assets/js/format.js";
 
 initShell("desk");
+const scanPanel = createTaskPanel(document.querySelector("#scan-task-panel"), { title: "方法论选股进度" });
 let currentCode = new URLSearchParams(location.search).get("code");
 let watchItems = [];
 let watchCodes = new Set();
@@ -38,9 +40,28 @@ async function loadStocks() {
   try {
     const data = await query("/api/stocks", params);
     renderRows(data.items);
-    setWorkContext({ run_id: data.run_id, strategy: data.strategy, as_of: data.as_of, data_cutoff: data.data_cutoff || data.data_cutoff_at, availability: data.availability, missing_reason: data.missing_reason });
+    const candidateCodes = (data.items || []).filter((item) => item.passed).map((item) => item.ts_code).filter(Boolean);
+    // 用户在侧栏锁定了批次时，绝不能把接口返回的 run_id 写回上下文——那会把用户的选择
+    // 覆盖成「这次实际查到的批次」，下拉框跳回原值，切换看着像没反应。
+    // 只有未锁定（跟随最新）时才由本页回填，让侧栏显示当前实际看的是哪一批。
+    const locked = Boolean(getWorkContext().run_id);
+    setWorkContext({
+      ...(locked ? {} : { run_id: data.run_id, as_of: data.as_of, strategy: data.strategy }),
+      data_cutoff: data.data_cutoff || data.data_cutoff_at,
+      availability: data.availability,
+      missing_reason: data.missing_reason,
+      candidate_codes: candidateCodes,
+    });
     fillIndustries(data.items);
     document.querySelector("#result-count").textContent = `${data.meta.total} 只候选`;
+    // 入选日期做成醒目 chip：用户反馈总览和选股台看不出「这是哪一天/哪一次的名单」。
+    // `/api/stocks` 不返回批次运行时刻，所以只说日期与是否锁定，不编时间。
+    const chip = document.querySelector("#desk-signal-chip");
+    if (chip) {
+      const lockedLabel = locked ? "已锁定所选批次" : "未锁定 · 显示最新一次";
+      const batch = data.run_id ? ` · 批次 ${String(data.run_id).slice(0, 8)}` : "";
+      chip.textContent = `入选日期 ${formatDate(data.as_of)} · ${lockedLabel}${batch}`;
+    }
     setStatus(`扫描截面 ${data.as_of}`, "ready");
     if (currentCode) await loadDetail(currentCode);
   } catch (error) {
@@ -256,13 +277,19 @@ function renderHistory(history) {
 async function startScan(online) {
   const buttons = document.querySelectorAll("[data-scan]");
   buttons.forEach((button) => { button.disabled = true; });
+  scanPanel.reset();
   try {
     const job = await request("/api/scans", { method: "POST", body: JSON.stringify({ strategy: "strong_mainup", online, record: true }) });
-    setStatus("扫描运行中", "");
-    await pollJob(job.job_id);
+    setStatus("扫描运行中", "active");
+    const result = await pollJob(job.job_id);
     await loadStocks();
+    if (result?.result?.run_id) {
+      setWorkContext({ run_id: result.result.run_id, strategy: result.result.strategy, as_of: result.result.as_of, data_cutoff: result.result.data_cutoff_at, candidate_codes: result.result.candidate_codes || undefined });
+    }
+    setStatus("方法论选股完成", "ready");
   } catch (error) {
     showError(error);
+    setStatus("选股失败", "error");
   } finally {
     buttons.forEach((button) => { button.disabled = false; });
   }
@@ -271,12 +298,31 @@ async function startScan(online) {
 async function pollJob(jobId) {
   while (true) {
     const job = await request(`/api/scans/${jobId}`);
+    scanPanel.update(job);
     document.querySelector("#scan-progress").textContent = job.status;
     if (job.status === "succeeded") return job;
     if (job.status === "failed") throw new Error(job.error?.message || "扫描失败");
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 700));
   }
 }
+async function resumeScan() {
+  const data = await query("/api/scans", { limit: 10 });
+  const scans = data.items || [];
+  const live = scans.find((item) => item.status === "queued" || item.status === "running");
+  const done = scans.find((item) => item.status === "succeeded");
+  if (live) {
+    setStatus("扫描已恢复", "active");
+    await pollJob(live.job_id || live.task_id);
+    await loadStocks();
+    return;
+  }
+  if (done) {
+    scanPanel.update(done);
+    document.querySelector("#scan-progress").textContent = done.status;
+    setStatus("已载入最近扫描", "ready");
+  }
+}
+
 
 document.querySelectorAll(".filters .field").forEach((field) => field.addEventListener("change", loadStocks));
 document.querySelector("#search")?.addEventListener("input", () => { clearTimeout(window.searchTimer); window.searchTimer = setTimeout(loadStocks, 250); });
@@ -285,304 +331,11 @@ document.querySelector("#watch-add-btn")?.addEventListener("click", addWatchFrom
 document.querySelector("#watch-add-code")?.addEventListener("keydown", (event) => {
   if (event.key === "Enter") { event.preventDefault(); addWatchFromInput(); }
 });
-loadStocks();
+// 侧栏切换入选批次后重载候选池：批次是全局上下文，页面必须跟着走，
+// 否则侧栏显示批次 A 而表格还是批次 B 的名单。
+window.addEventListener("hermes:batch-changed", () => { loadStocks().catch(showError); });
+loadStocks().then(resumeScan).catch(showError);
 loadWatchlist();
 loadIndustryMoneyflow();
 
 
-/* ---------- AI 研判 ---------- */
-
-const AGENT_LS = "hermes.agent.params";
-const agentStatusHost = document.querySelector("#agent-status");
-const agentPoolNote = document.querySelector("#agent-pool-note");
-const agentProgress = document.querySelector("#agent-progress");
-const agentStage = document.querySelector("#agent-stage");
-const agentStep = document.querySelector("#agent-step");
-const agentBar = document.querySelector("#agent-bar");
-const agentMessage = document.querySelector("#agent-message");
-const agentResults = document.querySelector("#agent-results");
-const agentRecent = document.querySelector("#agent-recent");
-const agentRunBtn = document.querySelector("#agent-run");
-const candidatesInput = document.querySelector("#agent-candidates");
-const depthInput = document.querySelector("#agent-depth");
-const finalInput = document.querySelector("#agent-final");
-const forceCheck = document.querySelector("#agent-force");
-
-let agentDefaults = { candidates: 200, depth: 8, final: 3 };
-let agentLimits = { max_candidates: 200, max_depth: 30, max_final: 10 };
-let agentJobId = null;
-let agentPollTimer = null;
-let agentBusy = false;
-
-const STAGE_LABEL = {
-  queued: "排队中",
-  coarse: "粗筛",
-  deep: "深度学习",
-  debate: "辩论",
-  done: "完成",
-};
-
-function readAgentParams() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(AGENT_LS) || "{}");
-    candidatesInput.value = saved.candidates ?? agentDefaults.candidates;
-    depthInput.value = saved.depth ?? agentDefaults.depth;
-    finalInput.value = saved.final ?? agentDefaults.final;
-  } catch {
-    candidatesInput.value = agentDefaults.candidates;
-    depthInput.value = agentDefaults.depth;
-    finalInput.value = agentDefaults.final;
-  }
-}
-
-function saveAgentParams() {
-  localStorage.setItem(AGENT_LS, JSON.stringify({
-    candidates: Number(candidatesInput.value) || agentDefaults.candidates,
-    depth: Number(depthInput.value) || agentDefaults.depth,
-    final: Number(finalInput.value) || agentDefaults.final,
-  }));
-}
-
-function clampAgentParams() {
-  candidatesInput.value = Math.max(1, Math.min(Number(candidatesInput.value) || 1, agentLimits.max_candidates));
-  depthInput.value = Math.max(1, Math.min(Number(depthInput.value) || 1, agentLimits.max_depth, Number(candidatesInput.value) || 1));
-  finalInput.value = Math.max(1, Math.min(Number(finalInput.value) || 1, agentLimits.max_final, Number(depthInput.value) || 1));
-  saveAgentParams();
-}
-
-function renderAgentStatus(info) {
-  if (!agentStatusHost) return;
-  const availability = info.availability;
-  if (availability === "available") {
-    agentStatusHost.innerHTML = `<span class="tag good">已配置</span> ${escapeHtml(info.provider || "openai_compatible")} · ${escapeHtml(info.model || "")}`;
-    return;
-  }
-  const label = availability === "disabled" ? "未启用" : "未配置";
-  const reason = info.reason || "AI 配置不完整";
-  agentStatusHost.innerHTML = `<span class="tag">${label}</span> ${escapeHtml(reason)}`;
-  agentRunBtn.disabled = availability !== "available";
-}
-
-async function loadAgentStatus() {
-  clearError();
-  try {
-    const info = await request("/api/agents/status");
-    agentDefaults = info.defaults || agentDefaults;
-    agentLimits = info.limits || agentLimits;
-    candidatesInput.max = agentLimits.max_candidates;
-    depthInput.max = agentLimits.max_depth;
-    finalInput.max = agentLimits.max_final;
-    readAgentParams();
-    renderAgentStatus(info);
-  } catch (error) {
-    showError(error);
-  }
-}
-
-async function loadAgentPoolNote() {
-  if (!agentPoolNote) return;
-  clearError();
-  try {
-    const data = await query("/api/agents/candidates", { limit: 200 });
-    agentPoolNote.textContent = `当前候选池 ${data.items.length} 只 · 截面 ${data.as_of || "—"}`;
-  } catch (error) {
-    agentPoolNote.textContent = "候选池读取失败";
-  }
-}
-
-async function loadAgentRecent() {
-  if (!agentRecent) return;
-  clearError();
-  try {
-    const data = await request("/api/agents/jobs?limit=6");
-    const jobs = data.items || [];
-    if (!jobs.length) { agentRecent.innerHTML = ""; return; }
-    agentRecent.innerHTML = `<div class="agent-empty" style="margin-bottom:4px">最近研判</div>` + jobs.map((job) => {
-      const st = job.status || "unknown";
-      return `<button type="button" class="agent-recent-row" data-job="${escapeHtml(job.job_id)}" data-status="${escapeHtml(st)}">
-        ${job.status === "succeeded" ? "✓" : ""}${job.status === "failed" ? "✗" : ""}
-        <span class="mono">${formatDate(job.trade_date || "")}</span>
-        ${job.result?.final?.length ?? "?"} 只 · ${escapeHtml(job.status)}
-      </button>`;
-    }).join("");
-    agentRecent.querySelectorAll("[data-job]").forEach((btn) => {
-      btn.addEventListener("click", () => openAgentJob(btn.dataset.job, btn.dataset.status));
-    });
-  } catch (error) {
-    agentRecent.innerHTML = "";
-  }
-}
-
-async function openAgentJob(jobId, status) {
-  if (!jobId) return;
-  agentJobId = jobId;
-  stopAgentPoll();
-  clearError();
-  agentProgress.hidden = false;
-  agentBar.style.width = "10%";
-  agentStage.textContent = "读取任务…";
-  agentStep.textContent = "";
-  agentMessage.textContent = "";
-  if (status === "succeeded" || status === "failed") {
-    await refreshAgentJob(jobId);
-    return;
-  }
-  startAgentPoll(jobId);
-}
-
-async function startJudge() {
-  if (agentBusy) return;
-  clearError();
-  clampAgentParams();
-  const body = {
-    candidates: Number(candidatesInput.value),
-    depth: Number(depthInput.value),
-    final: Number(finalInput.value),
-    force: forceCheck.checked,
-  };
-  agentRunBtn.disabled = true;
-  agentBusy = true;
-  try {
-    const job = await request("/api/agents/judge", { method: "POST", body: JSON.stringify(body) });
-    agentJobId = job.job_id;
-    agentProgress.hidden = false;
-    agentStage.textContent = "排队中";
-    agentStep.textContent = "";
-    agentMessage.textContent = "任务已提交，等待开始";
-    agentBar.style.width = "4%";
-    startAgentPoll(job.job_id);
-    loadAgentRecent();
-  } catch (error) {
-    showError(error);
-    agentProgress.hidden = true;
-  } finally {
-    agentBusy = false;
-    agentRunBtn.disabled = false;
-    const st = await request("/api/agents/status").catch(() => null);
-    if (st) renderAgentStatus(st);
-  }
-}
-
-function startAgentPoll(jobId) {
-  stopAgentPoll();
-  agentPollTimer = setInterval(() => refreshAgentJob(jobId), 1200);
-  refreshAgentJob(jobId);
-}
-
-function stopAgentPoll() {
-  if (agentPollTimer) { clearInterval(agentPollTimer); agentPollTimer = null; }
-}
-
-function renderAgentProgress(progress) {
-  if (!progress) return;
-  const stage = progress.stage || "queued";
-  agentStage.textContent = STAGE_LABEL[stage] || stage;
-  const total = Number(progress.total) || 0;
-  const step = Number(progress.step) || 0;
-  agentStep.textContent = total ? `${step} / ${total}` : "";
-  agentMessage.textContent = progress.message || "";
-  const pct = total ? Math.max(4, Math.round(step / total * 100)) : 4;
-  agentBar.style.width = pct + "%";
-}
-
-async function refreshAgentJob(jobId) {
-  try {
-    const job = await request(`/api/agents/jobs/${encodeURIComponent(jobId)}`);
-    if (job.progress) renderAgentProgress(job.progress);
-    if (job.status === "succeeded") {
-      stopAgentPoll();
-      renderJudgeResults(job);
-      agentStage.textContent = "完成";
-      agentBar.style.width = "100%";
-      agentMessage.textContent = `研判完成 · 截面 ${job.result?.as_of || ""} · 最终 ${job.judgments?.length || 0} 只`;
-      loadAgentRecent();
-    } else if (job.status === "failed") {
-      stopAgentPoll();
-      agentStage.textContent = "失败";
-      agentBar.style.width = "100%";
-      agentMessage.textContent = job.error?.message || "研判失败";
-      agentResults.innerHTML = "";
-    }
-  } catch (error) {
-    showError(error);
-  }
-}
-
-function stanceText(stance) {
-  return { bullish: "看多", neutral: "中性", bearish: "看空" }[stance] || stance || "—";
-}
-
-function verdictClass(verdict) {
-  if (verdict === "看多") return "verdict-bull";
-  if (verdict === "看空") return "verdict-bear";
-  return "verdict-flat";
-}
-
-function renderAnalyst(name, analyst) {
-  if (!analyst) return "";
-  return `<div class="agent-analyst"><b>${escapeHtml(name)}</b> <span class="mono">${formatNumber(analyst.score, 0)} · ${stanceText(analyst.stance)}</span>
-    <div style="margin-top:4px">${(analyst.points || []).map((pt) => "· " + escapeHtml(pt)).join("<br>")}</div>
-    ${(analyst.risks || []).length ? `<div style="color:#c49a4a;margin-top:3px">${analyst.risks.map((r) => "! " + escapeHtml(r)).join("<br>")}</div>` : ""}
-  </div>`;
-}
-
-function renderJudgeResults(job) {
-  if (!agentResults) return;
-  const items = job.judgments || [];
-  if (!items.length) { agentResults.innerHTML = `<div class="agent-empty">本次研判没有输出结论</div>`; return; }
-  agentResults.innerHTML = items.map((item) => {
-    const stage = item.stage || {};
-    const deep = stage.deep || {};
-    const debate = stage.debate || {};
-    const analysts = deep.analysts || {};
-    const inList = watchCodes.has(item.ts_code);
-    return `
-      <article class="agent-card" data-code="${escapeHtml(item.ts_code)}">
-        <div class="agent-card-head">
-          <strong>${escapeHtml(item.name || "—")}</strong>
-          <span class="mono">${escapeHtml(item.ts_code)}</span>
-          <span class="mono muted">排名 ${escapeHtml(Number(item.rank) || 0)}</span>
-          <span class="spacer"></span>
-          <span class="tag ${verdictClass(stage.verdict)}">${escapeHtml(stage.verdict || "未定")}</span>
-        </div>
-        <div class="agent-score-row"><span class="mono muted">综合 ${formatNumber(item.score, 0)}</span>
-          <span class="agent-score-track"><span class="agent-score-fill" style="width:${Math.max(0, Math.min(100, Number(item.score) || 0))}%"></span></span>
-          <span class="mono muted">${stanceText(item.stance)}</span>
-        </div>
-        <div class="agent-thesis">${escapeHtml(item.thesis || "—")}</div>
-        <div class="agent-action">操作建议：${escapeHtml(stage.action || "—")}</div>
-        ${(item.risks || []).length ? `<ul class="agent-risks">${item.risks.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` : ""}
-        <div class="agent-source" style="font-size:11px;color:var(--text-muted);margin:2px 0 8px">数据来源：选股台扫描 / 日线·周线指标 / TrendRadar 舆情 / 资金流</div>
-        <div class="agent-card-foot">
-          <button type="button" class="button primary" data-act="agent-watch" style="min-height:30px;padding:0 12px;font-size:12px">${inList ? "★ 已自选" : "☆ 加入自选"}</button>
-          <a class="button" href="p6_chart.html?code=${encodeURIComponent(item.ts_code)}" style="min-height:30px;padding:6px 12px;font-size:12px">看K线</a>
-        </div>
-        <details class="agent-detail">
-          <summary>分析师详情与多空辩论</summary>
-          ${renderAnalyst("方法论", analysts.methodology)}
-          ${renderAnalyst("舆情", analysts.sentiment)}
-          ${renderAnalyst("走势", analysts.trend)}
-          ${debate.bull || debate.bear ? `<div class="agent-debate"><div><b>多方：</b>${escapeHtml(debate.bull || "—")}</div><div class="bear"><b>空方：</b>${escapeHtml(debate.bear || "—")}</div></div>` : ""}
-        </details>
-      </article>`;
-  }).join("");
-  agentResults.querySelectorAll("[data-act='agent-watch']").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const card = btn.closest(".agent-card");
-      if (!card) return;
-      const code = card.dataset.code;
-      const existing = watchCodes.has(code);
-      const promise = existing
-        ? request(`/api/watchlist/${encodeURIComponent(code)}`, { method: "DELETE" })
-        : request("/api/watchlist", { method: "POST", body: JSON.stringify({ ts_code: code }) });
-      promise.then(() => loadWatchlist()).catch(showError);
-    });
-  });
-}
-
-[candidatesInput, depthInput, finalInput].forEach((input) => input.addEventListener("change", clampAgentParams));
-agentRunBtn?.addEventListener("click", startJudge);
-
-loadAgentStatus();
-loadAgentPoolNote();
-loadAgentRecent();

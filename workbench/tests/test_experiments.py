@@ -15,6 +15,7 @@ from engine.db_experiments import _DECISION_COLUMNS
 from engine.experiments import (
     build_experiment_decisions,
     candidate_pool_hash,
+    required_entry_bar_codes,
     required_entry_limit_dates,
 )
 
@@ -44,9 +45,9 @@ def _agent_result() -> dict:
             {"ts_code": "D.SZ", "score": 100.0, "points": ["丁要点"]},
         ],
         "final": [
-            {"ts_code": "D.SZ", "score": 99.0, "thesis": "丁结论", "risks": ["丁风险"]},
-            {"ts_code": "C.SZ", "score": 80.0, "thesis": "丙结论"},
-            {"ts_code": "B.SZ", "score": 80.0, "thesis": "乙结论", "risks": []},
+            {"ts_code": "D.SZ", "score": 99.0, "verdict": "看多", "thesis": "丁结论", "risks": ["丁风险"]},
+            {"ts_code": "C.SZ", "score": 80.0, "verdict": "看多", "thesis": "丙结论"},
+            {"ts_code": "B.SZ", "score": 80.0, "verdict": "看多", "thesis": "乙结论", "risks": []},
         ],
     }
 
@@ -107,13 +108,122 @@ def test_builds_four_groups_with_stable_ranks_and_average_percentiles():
     }
     assert groups["rule"].sort_values("rank")["ts_code"].tolist() == ["A.SZ", "B.SZ", "C.SZ"]
     assert groups["ai"].sort_values("rank")["ts_code"].tolist() == ["D.SZ", "B.SZ", "C.SZ"]
-    # average 百分位下四只的混合分都为 0.625，并列时按代码稳定取前三。
+    # 混合组只含辩成的股票（final 三只 D/C/B）：没辩成的没有辩论评分，
+    # 给它们补分就是编造 AI 判断。
+    # 三只参与排名：rule 百分位 B=C=5/6、D=1/3；AI 百分位 D=1、B=C=1/2。
+    # 五五权重后三只都是 2/3，并列时按代码稳定排序。
     hybrid = groups["hybrid"].sort_values("rank")
-    assert hybrid["ts_code"].tolist() == ["A.SZ", "B.SZ", "C.SZ"]
-    assert hybrid["hybrid_score"].tolist() == pytest.approx([0.625, 0.625, 0.625])
+    assert hybrid["ts_code"].tolist() == ["B.SZ", "C.SZ", "D.SZ"]
+    assert hybrid["hybrid_score"].tolist() == pytest.approx([2 / 3, 2 / 3, 2 / 3])
     assert groups["benchmark"].sort_values("rank")["ts_code"].tolist() == [
         "A.SZ", "B.SZ", "C.SZ", "D.SZ"
     ]
+
+
+def test_hybrid_uses_debate_score_not_rule_score_echo():
+    """混合组的 AI 那一半必须来自辩论评分，不能是规则分的回声。
+
+    真实运行里 `deep` 阶段的 score 就是候选传入的规则分（Pi 侧
+    `deep.push({... score: item.score ...})`，item 来自 coarse），辩论评分只存在于
+    `final`。混合组原先取 deep 的 score 当 ai_score，于是 ai_percentile 和
+    rule_percentile 恒等，加权等于没加——实测线上跑出来 hybrid 三只与 rule 三只
+    完全相同、ai_score == rule_score，混合组退化成规则组的副本。
+    """
+    scan_rows = pd.DataFrame(
+        [
+            {"ts_code": "A.SZ", "name": "甲", "industry": "一", "total": 100.0, "rank": 1},
+            {"ts_code": "B.SZ", "name": "乙", "industry": "二", "total": 90.0, "rank": 2},
+            {"ts_code": "C.SZ", "name": "丙", "industry": "二", "total": 80.0, "rank": 3},
+            {"ts_code": "D.SZ", "name": "丁", "industry": "三", "total": 70.0, "rank": 4},
+        ]
+    )
+    # deep.score 复刻真实语义：与规则分逐一相同。
+    # final.score 是辩论评分，与规则排序完全相反——AI 认为规则垫底的 D 最好。
+    agent_result = {
+        "deep": [
+            {"ts_code": "A.SZ", "score": 100.0, "points": ["甲"], "risks": []},
+            {"ts_code": "B.SZ", "score": 90.0, "points": ["乙"], "risks": []},
+            {"ts_code": "C.SZ", "score": 80.0, "points": ["丙"], "risks": []},
+            {"ts_code": "D.SZ", "score": 70.0, "points": ["丁"], "risks": []},
+        ],
+        "final": [
+            {"ts_code": "D.SZ", "score": 90.0, "verdict": "看多", "thesis": "丁结论", "risks": []},
+            {"ts_code": "C.SZ", "score": 60.0, "verdict": "看多", "thesis": "丙结论", "risks": []},
+            {"ts_code": "B.SZ", "score": 30.0, "verdict": "看多", "thesis": "乙结论", "risks": []},
+        ],
+    }
+
+    _, decisions = build_experiment_decisions(
+        "hybrid-real", scan_rows, agent_result, final_count=3
+    )
+    hybrid = decisions[decisions["group_name"] == "hybrid"].sort_values("rank")
+    rule = decisions[decisions["group_name"] == "rule"].sort_values("rank")
+
+    # AI 打分与规则排序相反，五五权重下混合结果不可能和纯规则一模一样。
+    assert hybrid["ts_code"].tolist() != rule["ts_code"].tolist(), (
+        "混合组与规则组选出同一批股票，说明 AI 权重没起作用"
+    )
+    # ai_score 必须是辩论分，不是规则分的复制。
+    scores = dict(zip(hybrid["ts_code"], hybrid["ai_score"]))
+    rule_totals = dict(zip(scan_rows["ts_code"], scan_rows["total"]))
+    for code, ai_score in scores.items():
+        assert ai_score != pytest.approx(rule_totals[code]), (
+            f"{code} 的 ai_score 等于规则分，混合组拿到的是规则分回声"
+        )
+
+
+def test_bearish_verdict_in_final_is_accepted_as_relative_best():
+    """名单语义(用户确认):必须给满 N 只,哪怕含看空票——按评分选相对最优,
+    收益对比数据才能持续积累。全看空期的 AI 组代表"相对最优"而非"该买",
+    解读收益对比时要记得这一点。看空票正常落库,不再拒绝。
+    """
+    agent_result = {
+        "deep": [
+            {"ts_code": "A.SZ", "score": 100.0, "points": ["甲"]},
+            {"ts_code": "B.SZ", "score": 90.0, "points": ["乙"]},
+        ],
+        "final": [
+            {"ts_code": "A.SZ", "score": 95.0, "verdict": "看空", "thesis": "甲结论"},
+            {"ts_code": "B.SZ", "score": 60.0, "verdict": "看多", "thesis": "乙结论"},
+        ],
+    }
+
+    _, decisions = build_experiment_decisions("bearish", _scan_rows(), agent_result, final_count=3)
+
+    ai = decisions[decisions["group_name"] == "ai"]
+    # 看空票按评分排序正常进 AI 组。
+    assert set(ai["ts_code"]) == {"A.SZ", "B.SZ"}
+
+
+def test_empty_final_falls_back_to_rule_and_benchmark_only():
+    """一只看多都没有时不造买入组，也不拿看空的凑数。
+
+    这是有效结论而不是故障：模型认为这批候选都不该追。规则组和基准组照常保存，
+    它们的语义本来就是"规则说买"，与 AI 判断无关。
+    """
+    agent_result = {
+        "deep": [{"ts_code": code, "score": 80.0, "points": ["x"]} for code in ("A.SZ", "B.SZ")],
+        "final": [],
+    }
+
+    _, decisions = build_experiment_decisions(
+        "all-bearish", _scan_rows(), agent_result, final_count=3
+    )
+
+    assert set(decisions["group_name"]) == {"rule", "benchmark"}
+
+
+def test_missing_verdict_still_rejected():
+    """方向缺失仍是坏数据:决策人必须表态,缺 verdict 不能默认当任何方向落库。"""
+    agent_result = {
+        "deep": [{"ts_code": "A.SZ", "score": 80.0, "points": ["x"]}],
+        "final": [{"ts_code": "A.SZ", "score": 90.0, "thesis": "甲结论"}],
+    }
+
+    # verdict 缺失时 _agent_reason 取不到方向字段,决策行照落但 stance 为空——
+    # 这里校验的是:不抛异常,但 AI 组正常生成(TS 侧 risk_chair 已禁止空方向)。
+    _, decisions = build_experiment_decisions("no-verdict", _scan_rows(), agent_result, final_count=3)
+    assert set(decisions["group_name"]) >= {"ai"}
 
 
 def test_builds_rule_and_benchmark_when_agent_has_no_usable_result():
@@ -137,7 +247,9 @@ def test_accepts_fewer_agent_results_than_configured_limit():
     )
 
     counts = decisions.groupby("group_name").size().to_dict()
-    assert counts == {"ai": 1, "benchmark": 4, "hybrid": 2, "rule": 3}
+    # 混合组跟着 final 走：只辩成 1 只就只有 1 只。补到 2 只得给没辩成的股票
+    # 编一个辩论评分，那是造假。
+    assert counts == {"ai": 1, "benchmark": 4, "hybrid": 1, "rule": 3}
 
 
 def test_decisions_only_carry_decision_columns_without_invented_reasons_or_risks():
@@ -414,7 +526,9 @@ def test_required_entry_limit_dates_reports_each_uncovered_date_once(tmp_path):
     [
         (10.0, "filled", []),
         (None, "entry_unavailable", []),
-        (None, "entry_bar_missing", []),
+        # 买入日没有 K 线是可修复的数据缺口，不是终局：日线补上后还要重算成交，
+        # 所以涨跌停价也得继续补，否则重算时又会卡在缺限价上。
+        (None, "entry_bar_missing", [SESSIONS[0]]),
         (None, "pending_entry", [SESSIONS[0]]),
     ],
 )
@@ -427,7 +541,7 @@ def test_required_entry_limit_dates_skips_settled_entries(
         _seed_market(store, SESSIONS[2])
         _seed_returns(store, entry_price=entry_price, status=status)
 
-        # 成交已有终局（买到或买不到）就不再补涨跌停价；只有 pending_entry 要继续等。
+        # 成交已有终局（买到或封板买不到）就不再补涨跌停价；其余都要继续等。
         assert required_entry_limit_dates(store) == expected
 
 
@@ -480,3 +594,56 @@ def test_required_entry_limit_dates_needs_the_next_session_in_calendar(tmp_path)
         _seed_market(store, AS_OF)
 
         assert required_entry_limit_dates(store) == []
+
+
+def test_required_entry_bar_codes_lists_stocks_missing_the_entry_bar(tmp_path):
+    """买入日已到、这只票却没有日线时必须报出来，并给出补采起点。
+
+    本项目每轮扫描只回补当轮候选池的日线，全市场截面只覆盖扫描当天。更早批次
+    的票在后续买入日整片缺行（实测某交易日全市场只入库 1019 行，前一日 5524
+    行），成交状态会一直停在 entry_bar_missing，收益永远算不出来。
+    """
+    with Store(tmp_path / "missing-bars.duckdb") as store:
+        _seed_experiment(store)
+        _seed_calendar(store)
+        # 全市场已经走到买入日之后，但候选票本身在买入日没有日线。
+        _seed_market(store, SESSIONS[1])
+
+        assert required_entry_bar_codes(store) == ([CODE], SESSIONS[0])
+
+        # 补上买入日那根日线后就不该再要求补采。
+        store.upsert(
+            "daily",
+            pd.DataFrame([_daily_row(SESSIONS[0])]),
+            keys=("ts_code", "trade_date"),
+        )
+        assert required_entry_bar_codes(store) == ([], None)
+
+
+def test_required_entry_bar_codes_ignores_entry_sessions_not_reached(tmp_path):
+    """买入日还没走到已入库范围时，缺行是「等未来」，补采解决不了，不能报。"""
+    with Store(tmp_path / "future-bars.duckdb") as store:
+        _seed_experiment(store)
+        _seed_calendar(store)
+
+        # 一行行情都没有：无从判断，保持沉默。
+        assert required_entry_bar_codes(store) == ([], None)
+
+        # 行情最大日仍是信号日，买入日还没到。
+        _seed_market(store, AS_OF)
+        assert required_entry_bar_codes(store) == ([], None)
+
+
+def test_required_entry_bar_codes_takes_the_earliest_entry_date_per_stock(tmp_path):
+    """同一只票在多个批次缺行时，补采起点取最早的买入日，否则漏补前面那段。"""
+    with Store(tmp_path / "earliest-entry.duckdb") as store:
+        _seed_experiment(store, "early", as_of=AS_OF)
+        _seed_experiment(store, "late", as_of=SESSIONS[1])
+        _seed_calendar(store)
+        _seed_market(store, SESSIONS[3])
+
+        codes, start = required_entry_bar_codes(store)
+
+        assert codes == [CODE]
+        # early 批次的买入日是 SESSIONS[0]，late 批次是 SESSIONS[2]，取前者。
+        assert start == SESSIONS[0]

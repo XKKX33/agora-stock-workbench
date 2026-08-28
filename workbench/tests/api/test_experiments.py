@@ -311,6 +311,108 @@ def test_experiments_use_run_id_as_stable_pagination_tiebreaker(
     ]
 
 
+def test_experiments_filter_by_run_id_isolates_one_batch(experiment_client, db_path):
+    """同一信号日跑了两次，run_id 必须只返回选中的那一个批次。
+
+    总览页选定批次后会把 run_id 带进台账页。后端不声明这个参数时 FastAPI 会
+    静默丢弃它，用户看到的是当天**全部批次混合**的列表，同一只票出现多次，
+    却以为在看自己选的那一批。
+    """
+    with Store(db_path, ensure_schema=False) as store:
+        store.record_experiment(
+            _run_row("rerun-20260804", "20260804"),
+            _decisions("rerun-20260804"),
+        )
+
+    unfiltered = experiment_client.get(
+        "/api/experiments", params={"as_of": "20260804", "group": "ai"}
+    ).json()
+    filtered = experiment_client.get(
+        "/api/experiments",
+        params={"as_of": "20260804", "group": "ai", "run_id": "rerun-20260804"},
+    ).json()
+
+    # 不筛批次：同一只票被两个批次各选一次，台账里就出现两行。
+    assert unfiltered["total"] == 2
+    assert [item["ts_code"] for item in unfiltered["items"]] == [
+        "000001.SZ",
+        "000001.SZ",
+    ]
+    # 筛了批次：只剩选中的那一批，total 也要跟着收窄（分页才不会错）。
+    assert filtered["total"] == 1
+    assert [item["run_id"] for item in filtered["items"]] == ["rerun-20260804"]
+
+
+def test_experiments_carry_batch_run_time_so_reruns_are_distinguishable(experiment_client):
+    """同一信号日跑多次时，每行必须带批次运行时间，否则台账上分不清哪行属于哪次。
+
+    线上实测 20260821 跑了 3 次、20260706 跑了 4 次。台账只按 as_of 分组，
+    同一天的多个批次全挤在一条「信号日」分隔线下，同一只票重复出现且看不出区别——
+    用户无法判断自己在看哪一次的入选结果。信号日只说明「基于哪天的行情」，
+    说明不了「什么时候跑的这一次」。
+    """
+    payload = experiment_client.get(
+        "/api/experiments", params={"as_of": "20260804", "group": "ai"}
+    ).json()
+
+    assert payload["items"], "夹具里应有 ai 组数据"
+    for item in payload["items"]:
+        assert item.get("run_created_at"), (
+            f"{item['run_id']} 缺 run_created_at：台账无法区分同一信号日的多个批次"
+        )
+
+
+def test_experiment_batches_list_every_run_newest_first(experiment_client, db_path):
+    """批次列表必须列出全部已落库批次，最新的在前。
+
+    台账的批次下拉框要用它。从分页后的台账数据里提取批次是不行的：一页只有 200 行，
+    更早的批次根本不在这一页里，下拉框会缺项，用户选不到自己要看的那一次。
+    """
+    with Store(db_path, ensure_schema=False) as store:
+        store.record_experiment(
+            _run_row("later-20260805", "20260805"),
+            _decisions("later-20260805"),
+        )
+
+    payload = experiment_client.get("/api/experiments/batches").json()
+    items = payload["items"]
+
+    run_ids = [item["run_id"] for item in items]
+    # 新增的批次必须排在最前，且既有批次一个都不能丢（下拉框缺项等于选不到）。
+    assert run_ids[0] == "later-20260805"
+    assert {"run-20260804", "run-20260803"} <= set(run_ids)
+    # 信号日降序：as_of 是主排序键。
+    assert [item["as_of"] for item in items] == sorted(
+        (item["as_of"] for item in items), reverse=True
+    )
+    for item in items:
+        for field in ("run_id", "as_of", "created_at", "final_count", "candidate_count"):
+            assert item.get(field) is not None, f"{item['run_id']} 缺 {field}"
+
+
+def test_experiment_batches_exclude_unsucceeded_runs(experiment_client, db_path):
+    """没跑成的批次不进下拉框：它没有可看的入选结果，列出来只会让人以为有数据。"""
+    with Store(db_path, ensure_schema=False) as store:
+        store.create_experiment_run(_run_row("failed-20260806", "20260806"))
+
+    run_ids = [
+        item["run_id"]
+        for item in experiment_client.get("/api/experiments/batches").json()["items"]
+    ]
+
+    assert "failed-20260806" not in run_ids
+
+
+def test_experiments_unknown_run_id_returns_empty_not_all_rows(experiment_client):
+    """筛一个不存在的批次必须返回空，绝不能退化成「忽略条件返回全部」。"""
+    payload = experiment_client.get(
+        "/api/experiments", params={"run_id": "no-such-run"}
+    ).json()
+
+    assert payload["total"] == 0
+    assert payload["items"] == []
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

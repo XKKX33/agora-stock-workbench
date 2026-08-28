@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agent 研判看板 · Hermes Quant</title>
+  <title>Agent 研判看板 · AGORA Quant</title>
   <link rel="stylesheet" href="/assets/css/theme.css">
   <link rel="icon" href="data:,">
 </head>
@@ -39,13 +39,26 @@
         </article>
 
         <article class="panel" aria-labelledby="matrix-title">
-          <div class="panel-header"><div><h2 id="matrix-title">分析师 / 辩论矩阵</h2><p>方法论、舆情、走势与多空交锋</p></div></div>
+          <div class="panel-header">
+            <div><h2 id="matrix-title">分析师 / 辩论矩阵</h2><p>方法论、舆情、走势与多空交锋（同一只股票）</p></div>
+            <div class="matrix-picker">
+              <label class="dashboard-select-label" for="matrix-stock-select">研判股票</label>
+              <select id="matrix-stock-select" class="field" aria-label="选择要查看辩论的股票">
+                <option value="">等待公开消息…</option>
+              </select>
+            </div>
+          </div>
           <div id="debate-matrix" class="debate-matrix"><div class="empty-state">暂无研判消息</div></div>
         </article>
 
         <article class="panel" aria-labelledby="risk-title">
           <div class="panel-header"><div><h2 id="risk-title">风控</h2><p>Risk chair 的公开结论与引用</p></div></div>
           <div id="risk-chair" class="risk-chair"><div class="empty-state">暂无风控结论</div></div>
+        </article>
+
+        <article class="panel dashboard-final-panel" aria-labelledby="final-title">
+          <div class="panel-header"><div><h2 id="final-title">终稿多空辩论</h2><p>每只入选股票的多方 / 空方 / 多方反驳 / 风控四段结论</p></div></div>
+          <div id="final-debate" class="final-debate"><div class="empty-state">暂无终稿结论</div></div>
         </article>
 
         <article class="panel dashboard-returns-panel" aria-labelledby="returns-title">

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>行情K线 · Hermes Quant</title>
+  <title>行情K线 · AGORA Quant</title>
   <link rel="stylesheet" href="/assets/css/theme.css">
   <link rel="icon" href="data:,">
   <style>
@@ -66,7 +66,11 @@
     .quote-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; margin-top: 16px; }
     .metric-cell { display: grid; gap: 3px; }
     .metric-label { color: var(--text-muted); font-size: 10px; }
-    .metric-value { font: 600 15px var(--font-mono); font-variant-numeric: tabular-nums; }
+    /* theme.css 里有 html[data-theme] .metric-value{font-size:30px}，特异性高于裸类选择器，
+       会把本页 15px 的紧凑数值撑成 30px，124px 宽的 metric-cell 直接溢出、
+       成交额与换手率两列数字叠在一起（读成 "4,924,166.09%"）。
+       这里补齐同级特异性把本页字号钉死，不动全局 theme.css。 */
+    html[data-theme] .quote-grid .metric-value { font: 600 15px var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: 0; }
 
     /* 指标切换按钮组 */
     .chart-panel .panel-header { align-items: flex-start; }

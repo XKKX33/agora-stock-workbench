@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Agent · Hermes Quant</title>
+  <title>AI Agent · AGORA Quant</title>
   <link rel="stylesheet" href="/assets/css/theme.css">
   <link rel="icon" href="data:,">
   <style>
@@ -22,8 +22,9 @@
       background: rgba(255,255,255,.03);
     }
     .mode-tabs .tab-btn {
-      padding: 7px 20px; border: 1px solid rgba(148,163,184,.18); border-radius: var(--radius-pill);
-      background: rgba(255,255,255,.02); font-size: 12px; cursor: pointer; transition: var(--t);
+      height: 32px; min-height: 32px; padding: 0 20px;
+      border: 1px solid rgba(148,163,184,.18); border-radius: var(--radius-pill);
+      background: rgba(255,255,255,.02); font-size: 12px; line-height: 1; cursor: pointer; transition: var(--t);
       color: var(--text-muted);
       backdrop-filter: blur(4px);
     }
@@ -130,9 +131,9 @@
     /* ===== 增强排版 ===== */
     /* 模式切换胶囊：高亮态更醒目 */
     .mode-tabs .tab-btn {
-      display: inline-flex; align-items: center; gap: 6px;
+      display: inline-flex; align-items: center; justify-content: center; text-align: center; gap: 6px;
       position: relative; overflow: hidden;
-      min-height: 30px;
+      height: 32px; min-height: 32px; padding: 0 20px; line-height: 1;
       border-color: transparent;
       background: rgba(255,255,255,.04);
     }

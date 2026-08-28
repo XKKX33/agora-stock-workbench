@@ -18,7 +18,7 @@ import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 
 from .config import load_settings, load_strategy, resolve_path, tushare_token
@@ -965,13 +965,15 @@ def run_scan(
     record: bool = True,
     overrides: Optional[Dict[str, Any]] = None,
     as_of: Optional[str] = None,
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> ScanResult:
-    """按“数据准备 → 完整性检查 → 评分”执行一次扫描。
+    """按“数据准备 → 完整性检查 → 评分”执行一次扫描。"""
+    def emit(stage: str, step: int, total: int, message: str) -> None:
+        if on_progress is not None:
+            on_progress(stage=stage, step=step, total=total, message=message)
 
-    as_of 省略时由 `_ensure_data` 取本地/在线最新交易日,这是纯数据口径,
-    不含可见性判断;调用方(API 的 ScanManager、盘后链条、CLI)必须自己把
-    可见日算好传进来,否则隐藏窗口里的行情会被直接拿来选股。
-    """
+    total = 3
+    emit("prepare", 1, total, "开始准备扫描数据")
     prepared = prepare_scan_data(
         strategy_name=strategy_name,
         online=online,
@@ -979,8 +981,14 @@ def run_scan(
         overrides=overrides,
         as_of=as_of,
     )
+    emit("prepare", 1, total, f"候选池准备完成: {len(prepared.candidates)} 只")
+    emit("integrity", 2, total, "开始校验扫描数据完整性")
     validate_scan_integrity(prepared)
-    return score_prepared_scan(prepared, record=record)
+    emit("integrity", 2, total, "扫描数据完整性校验通过")
+    emit("score", 3, total, "开始计算因子与综合评分")
+    result = score_prepared_scan(prepared, record=record)
+    emit("score", 3, total, "综合评分完成")
+    return result
 
 
 def scan_completion_payload(result: ScanResult) -> Dict[str, Any]:

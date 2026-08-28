@@ -16,24 +16,22 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import queue
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import pandas as pd
 
+# 研判一律走 Pi Agent 侧车。engine.agents 里的 run_judge / run_single /
+# run_public_debate 是旧的直连实现,这里只借用它的配置与状态查询。
 from engine.agents import (
     AgentConfig,
     AgentOutputError,
     load_agent_config,
-    run_judge,
-    run_public_debate,
-    run_single,
     status as agent_status,
 )
 from engine.ai import (
@@ -45,7 +43,7 @@ from engine.ai import (
 )
 from engine.config import load_settings_with_local
 from engine.db import Store
-from engine.methodology import build_agent_brief
+from engine.methodology import ANALYST_ROLES, DEBATE_ROUNDS, build_agent_brief
 from engine.visibility import (
     LookaheadBlocked,
     VisibilityWindow,
@@ -183,11 +181,42 @@ class AgentJudgeManager(AgentDataMixin):
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quant-agent")
         self._pi_agent_status: dict[str, Any] = {"availability": "unavailable", "reason": "Pi Agent 尚未启动"}
         self._pi_agent_client: PiAgentClient | None = None
+        self._pi_supervisor: Any = None
 
     def set_pi_agent_status(self, status: dict[str, Any], client: PiAgentClient | None = None) -> None:
         self._pi_agent_status = dict(status)
         if client is not None:
             self._pi_agent_client = client
+
+    def set_pi_supervisor(self, supervisor: Any) -> None:
+        self._pi_supervisor = supervisor
+
+    def _live_pi_client(self) -> PiAgentClient:
+        """取一个确认可用的客户端。
+
+        可用状态是启动那一刻的快照。子进程崩掉后没人改它，系统会一直宣称可用，
+        直到真正调用才炸。这里在每次用之前复检一次，能重启就重启。
+        """
+        if self._pi_supervisor is not None:
+            handle = self._pi_supervisor.ensure_alive()
+            if handle is not None:
+                self._pi_agent_client = handle.client
+                self._pi_agent_status = {"availability": "available", "base_url": handle.base_url}
+            else:
+                self._pi_agent_status = {"availability": "unavailable", "reason": "Pi Agent 子进程已退出且无法重启"}
+        client = self._pi_agent_client
+        if client is None or self._pi_agent_status.get("availability") != "available":
+            # details 必须带可用性自述：前端把 error.details 直接渲染成"为什么不可用"，
+            # 不会为一次失败再请求一遍 /api/agents/status。默认 unavailable 打底，
+            # 真实状态里的同名键覆盖它——与重构前 start_single 里的内联检查同口径。
+            details = {"availability": "unavailable", **self._pi_agent_status}
+            raise WorkbenchError(
+                "pi_agent_unavailable",
+                details.get("reason") or "Pi Agent 不可用",
+                status_code=503,
+                details=details,
+            )
+        return client
 
     def events(self, run_id: str, after_seq: int = 0, limit: int = 500) -> dict:
         if after_seq < 0 or limit < 1 or limit > 500:
@@ -274,16 +303,25 @@ class AgentJudgeManager(AgentDataMixin):
         final_count: Optional[int] = None,
         ts_codes: Optional[list[str]] = None,
         force: bool = False,
+        run_id: Optional[str] = None,
         as_of: Optional[str] = None,
     ) -> dict:
-        """发起一次多 agent 研判。
-
-        as_of 省略时走默认口径(最近一次扫描的 as_of,没有则退到可见日);显式
-        指定时先过可见闸门——这是输入错误,和 AI 配置无关,所以放在配置检查之前。
-        """
-        requested_as_of = (
-            self._ensure_visible_as_of(as_of) if as_of is not None else None
-        )
+        """发起一次多 agent 研判,可锁定前一步扫描批次。"""
+        requested_as_of = self._ensure_visible_as_of(as_of) if as_of is not None else None
+        scan_strategy = None
+        if run_id:
+            try:
+                scan_run, _ = self.repository.scan_batch(run_id, as_of=requested_as_of)
+            except WorkbenchError:
+                raise
+            scan_as_of = str(scan_run.get("as_of") or "")
+            if not scan_as_of:
+                raise WorkbenchError("scan_not_found", f"扫描批次 {run_id} 缺少交易日", status_code=404)
+            visible_as_of = self._ensure_visible_as_of(scan_as_of)
+            if requested_as_of is not None and requested_as_of != visible_as_of:
+                raise WorkbenchError("scan_context_mismatch", "扫描批次与信号日不一致", status_code=409)
+            requested_as_of = visible_as_of
+            scan_strategy = str(scan_run.get("strategy") or "") or None
         agent, ai = self._configs()
         info = agent_status(agent, ai)
         if not agent.enabled:
@@ -300,15 +338,13 @@ class AgentJudgeManager(AgentDataMixin):
                 status_code=503,
                 details=info,
             )
-
         candidates_n, depth_n, final_n = agent.clamp(
             candidates if candidates is not None else agent.default_candidates,
             depth if depth is not None else agent.default_depth,
             final_count if final_count is not None else agent.default_final,
         )
-
         as_of = requested_as_of or self._resolve_as_of()
-        strategy = f"c{candidates_n}d{depth_n}f{final_n}"
+        strategy = f"c{candidates_n}d{depth_n}f{final_n}:scan={run_id or 'latest'}"
         claim = self.tracker.claim(
             kind=TASK_KIND,
             trade_date=as_of,
@@ -318,7 +354,6 @@ class AgentJudgeManager(AgentDataMixin):
         )
         if not claim.claimed:
             return self._handle_conflict(claim, candidates_n, depth_n, final_n)
-
         created = self.tracker.now()
         with Store(self.db_path, ensure_schema=True) as store:
             store.record_agent_run(
@@ -343,7 +378,7 @@ class AgentJudgeManager(AgentDataMixin):
                 }
             )
         self._executor.submit(
-            self._run, claim.task_id, as_of, candidates_n, depth_n, final_n, ts_codes
+            self._run, claim.task_id, as_of, candidates_n, depth_n, final_n, ts_codes, run_id, scan_strategy
         )
         return {
             "job_id": claim.task_id,
@@ -351,11 +386,8 @@ class AgentJudgeManager(AgentDataMixin):
             "status": "queued",
             "kind": TASK_KIND,
             "trade_date": as_of,
-            "params": {
-                "candidates": candidates_n,
-                "depth": depth_n,
-                "final": final_n,
-            },
+            "scan_run_id": run_id,
+            "params": {"candidates": candidates_n, "depth": depth_n, "final": final_n},
             "created_at": created,
             "reused": False,
         }
@@ -388,14 +420,7 @@ class AgentJudgeManager(AgentDataMixin):
                 status_code=503,
                 details=info,
             )
-        if self._pi_agent_client is None or self._pi_agent_status.get("availability") != "available":
-            pi_info = {"availability": "unavailable", **self._pi_agent_status}
-            raise WorkbenchError(
-                "pi_agent_unavailable",
-                pi_info.get("reason") or "Pi Agent 不可用",
-                status_code=503,
-                details=pi_info,
-            )
+        self._live_pi_client()
         if info.get("availability") != "available":
             raise WorkbenchError(
                 "agent_unconfigured",
@@ -463,13 +488,7 @@ class AgentJudgeManager(AgentDataMixin):
         self.tracker.mark_running(task_id)
         self._publish_event(task_id, "run.started", stage="run", status="running")
         try:
-            client = self._pi_agent_client
-            if client is None or self._pi_agent_status.get("availability") != "available":
-                raise WorkbenchError(
-                    "pi_agent_unavailable",
-                    self._pi_agent_status.get("reason") or "Pi Agent 不可用",
-                    status_code=503,
-                )
+            client = self._live_pi_client()
             frozen = self.freeze_agent_input(1, [ts_code], as_of)
             agent, ai = self._configs()
             request = PiAgentRequest(
@@ -606,15 +625,16 @@ class AgentJudgeManager(AgentDataMixin):
                 ) from exc
     def _run(
         self, task_id: str, as_of: str, candidates_n: int, depth_n: int,
-        final_n: int, ts_codes: Optional[list[str]],
+        final_n: int, ts_codes: Optional[list[str]], run_id: Optional[str] = None,
+        scan_strategy: Optional[str] = None,
     ) -> None:
         self.tracker.mark_running(task_id)
         self._publish_event(task_id, "run.started", stage="run", status="running")
         try:
-            client = self._pi_agent_client
-            if client is None or self._pi_agent_status.get("availability") != "available":
-                raise WorkbenchError("pi_agent_unavailable", self._pi_agent_status.get("reason") or "Pi Agent 不可用", status_code=503)
-            frozen = self.freeze_agent_input(candidates_n, ts_codes, as_of)
+            client = self._live_pi_client()
+            frozen = self.freeze_agent_input(
+                candidates_n, ts_codes, as_of, run_id=run_id, strategy=scan_strategy
+            )
             agent, ai = self._configs()
             request = PiAgentRequest(
                 protocol_version="1", workflow_version="1", mode="batch", trade_date=as_of,
@@ -626,8 +646,28 @@ class AgentJudgeManager(AgentDataMixin):
                 methodology=PiMethodology(**build_agent_brief()),
             )
             pi_run_id = client.start_judgment(request)
+            # 进度必须由事件推进。只在入队时写一次 queued 的话,十几分钟里前端永远显示
+            # "等待开始",看着像没跑;真实进度就在这条事件流里,顺手记下来即可。
+            # 总步数可精确算:分析阶段每只股票 3 个角色,辩论阶段每只**候选** 4 轮。
+            # 排序环节删除后 20 只全部参辩,按 final_n 算总步数会让进度条早早跑满被钳在
+            # 100%,后面十几分钟看着像卡死。
+            total_steps = len(frozen.candidates) * (len(ANALYST_ROLES) + len(DEBATE_ROUNDS))
+            done_steps = 0
+            self._update_progress(task_id, "analysis", 0, total_steps, "分析师逐只研判中")
             for event in client.stream_events(pi_run_id):
                 self._relay_pi_event(task_id, event)
+                # 心跳跟着"收到任何事件"走，不能只跟着 message.completed。断流那一轮
+                # 20 只候选只产生 14 次 completed，心跳空档 19 分钟，回收机制会把这个
+                # 正在跑的任务判成僵死。失败事件同样证明进程活着。
+                self.tracker.heartbeat(task_id)
+                if str(event.get("event_type") or event.get("type") or "") != "message.completed":
+                    continue
+                done_steps += 1
+                role = str(event.get("role") or "")
+                code = str(event.get("ts_code") or "")
+                stage = "debate" if role in DEBATE_ROUNDS else "analysis"
+                label = f"{role} · {code}" if code else role
+                self._update_progress(task_id, stage, min(done_steps, total_steps), total_steps, label, role=role, ts_code=code)
             result = client.get_result(pi_run_id, request)
             result_dict = result.model_dump(mode="json")
             self._persist_pi(task_id, result_dict, frozen.candidates)
@@ -653,12 +693,15 @@ class AgentJudgeManager(AgentDataMixin):
             with Store(self.db_path, ensure_schema=True) as store:
                 store.upsert_agent_judgments(pd.DataFrame(rows))
 
-    def _update_progress(self, task_id: str, stage: str, step: int, total: int, message: str) -> None:
+    def _update_progress(self, task_id: str, stage: str, step: int, total: int, message: str, role: str = "", ts_code: str = "") -> None:
         progress = {
             "stage": stage,
             "step": step,
             "total": total,
+            "percent": int(step * 100 / total) if total else 0,
             "message": message,
+            "role": role,
+            "ts_code": ts_code,
             "at": datetime.now(timezone.utc).isoformat(),
         }
         with Store(self.db_path, ensure_schema=True) as store:
@@ -668,6 +711,10 @@ class AgentJudgeManager(AgentDataMixin):
                 progress_json=json.dumps(progress, ensure_ascii=False),
                 heartbeat_at=self.tracker.now(),
             )
+            # agent_runs 和 task_runs 是两张表,接口的 heartbeat_at 读的是后者。
+            # 只更新前者会让任务看起来几十分钟没有心跳,与"卡死"无法区分。
+            # 复用当前连接,不另开一次。
+            store.task_heartbeat(task_id, self.tracker.now())
 
     def _persist(self, task_id: str, result: dict) -> None:
         """把最终结论落 agent_judgments(含辩论与三位分析师详情)。"""

@@ -658,3 +658,25 @@ def test_unregistered_source_item_aborts_batch_without_partial_news(store: Store
         collect_news(store=store, trade_date=TRADE_DATE, fetchers=[fetcher])
 
     assert store.con.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 0
+def test_collect_news_progress_callback_reports_real_stages(store: Store):
+    _seed(store)
+    events = []
+    fetcher = FakeFetcher(_source(), [_item()])
+
+    collect_news(
+        store=store,
+        trade_date=TRADE_DATE,
+        fetchers=[fetcher],
+        on_progress=lambda **event: events.append(event),
+    )
+
+    assert [event["stage"] for event in events] == [
+        "prepare",
+        "fetch_sources",
+        "normalize",
+        "deduplicate",
+        "link",
+        "persist",
+    ]
+    assert events[-1]["step"] == events[-1]["total"]
+    assert "1" in events[1]["message"]

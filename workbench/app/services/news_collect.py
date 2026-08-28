@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -172,7 +171,12 @@ class NewsCollectManager:
         """确定目标交易日。
 
         手动指定时校验它确实是开市日(不能让步,否则批次挂在非交易日上);
-        省略时取日历最近的开市日,与 close_pipeline._cli 的口径一致。
+        省略时取**本地已有行情截面**的最近交易日。
+
+        为什么不取日历最近开市日:舆情必须与当日行情截面建立关联
+        (engine.news._load_universe 依赖 store.snapshot),日历会走到今天,
+        而今天盘后行情往往还没入库,截面为空 -> 采集必然失败。默认值应当指向
+        一个真实可用的交易日,而不是一个日历上存在、数据上为空的日期。
         """
         exchange = self._exchange()
         if trade_date is not None:
@@ -199,22 +203,43 @@ class NewsCollectManager:
                 )
             return target
 
-        # 取"明天及之前"的最近开市日:当天盘中也能采,归属由 close_cutoff 决定。
+        # 取本地已入库行情的最近交易日:舆情关联需要当日截面,日历日期不保证有数据。
         with Store(self.db_path, ensure_schema=False) as store:
-            end = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
-            dates = store.open_dates(exchange, end, 1)
-        if not dates:
+            latest = store.latest_confirmed_date(self._min_daily_rows()) or store.latest_date()
+        if not latest:
             raise WorkbenchError(
-                "calendar_missing",
-                f"trade_cal 无 {exchange} 开市日记录,无法确定目标交易日;请先回补日历",
+                "market_data_missing",
+                "本地没有任何行情数据,无法确定舆情采集的目标交易日;请先完成行情入库",
                 status_code=503,
             )
-        return dates[-1]
+        return latest
+
+    def _min_daily_rows(self) -> int:
+        """已确认交易日的行数阈值,与摄取层同口径(data.min_daily_rows)。"""
+        raw = (load_settings().get("data") or {}).get("min_daily_rows", 1000)
+        try:
+            return int(raw)
+        except (TypeError, ValueError) as exc:
+            raise WorkbenchError(
+                "settings_invalid",
+                f"data.min_daily_rows 必须是整数,实际为 {raw!r}",
+                status_code=400,
+            ) from exc
 
     # ------------------------------------------------------------ 执行
     def _run(self, task_id: str, trade_date: str, config: NewsConfig) -> None:
-        """后台线程执行采集。失败先落库再上抛,绝不静默吞掉。"""
+        """后台线程执行采集，阶段进度与终态都持久化。"""
         self.tracker.mark_running(task_id)
+
+        def on_progress(*, stage: str, step: int, total: int, message: str) -> None:
+            self.tracker.update_progress(
+                task_id,
+                stage=stage,
+                step=step,
+                total=total,
+                message=message,
+            )
+
         try:
             fetchers = build_fetchers(config)
             with Store(self.db_path, ensure_schema=True) as store:
@@ -225,15 +250,13 @@ class NewsCollectManager:
                     exchange=self._exchange(),
                     close_cutoff=config.close_cutoff,
                     half_life_days=config.half_life_days,
+                    on_progress=on_progress,
                 )
-        except Exception as error:  # noqa: BLE001 - 落库后原样上抛
+        except Exception as error:
             self.tracker.finish(
                 task_id,
                 status="failed",
-                error={
-                    "type": type(error).__name__,
-                    "message": str(error),
-                },
+                error={"type": type(error).__name__, "message": str(error)},
             )
             logger.exception("舆情采集 %s(%s)失败", task_id, trade_date)
             raise
@@ -241,7 +264,16 @@ class NewsCollectManager:
         self.tracker.finish(
             task_id,
             status="succeeded",
-            result=result.as_dict(),
+            result={
+                **result.as_dict(),
+                "progress": {
+                    "stage": "complete",
+                    "step": 6,
+                    "total": 6,
+                    "percent": 100,
+                    "message": "舆情采集完成",
+                },
+            },
         )
 
     # ------------------------------------------------------------ 查询

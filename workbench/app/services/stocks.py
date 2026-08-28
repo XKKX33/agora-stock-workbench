@@ -31,8 +31,17 @@ class StocksService:
         search: str | None,
         sort: str,
         order: str,
+        run_id: str | None = None,
+        as_of: str | None = None,
+        strategy: str | None = None,
     ) -> dict:
-        run, frame = self.repository.latest_scan_rows()
+        # 指定批次时读那一批，否则跟随最新。`scan_runs` 每个信号日保留一个批次，
+        # 所以「按入选日期看当时的候选池」可行。原先这里硬编码 latest_scan_rows()，
+        # 侧栏切了批次也永远返回最新那一批，且没有任何报错。
+        if run_id:
+            run, frame = self.repository.scan_batch(run_id, as_of=as_of, strategy=strategy)
+        else:
+            run, frame = self.repository.latest_scan_rows()
         data = frame.copy()
         if passed is not None:
             data = data[data["passed"] == passed]

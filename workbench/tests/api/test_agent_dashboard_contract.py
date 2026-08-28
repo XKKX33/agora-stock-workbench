@@ -35,6 +35,18 @@ def test_dashboard_controller_declares_api_and_replay_contract():
     assert "暂无可测数据" in controller
 
 
-def test_dashboard_nav_points_to_page():
-    shell = (UI_ROOT / "assets" / "js" / "app-shell.js").read_text(encoding="utf-8")
-    assert '"agent-dashboard", "p13_agent_dashboard.html"' in shell
+def test_dashboard_page_is_reachable_from_the_workbench():
+    """研判看板必须有入口，但不必占侧栏一格。
+
+    侧栏已精简成六个主流程入口(总览/选股/舆情/辩论/自选/设置),看板改由辩论页、
+    台账页、回测页内部跳转进入。这里锁的是"进得去",不是"在哪一格"——否则每次
+    调整导航结构测试就假红一次。
+    """
+    page = UI_ROOT / "p13_agent_dashboard.html"
+    assert page.exists(), "研判看板页面文件不存在"
+    linked = [
+        html.name
+        for html in UI_ROOT.glob("*.html")
+        if html.name != page.name and "p13_agent_dashboard.html" in html.read_text(encoding="utf-8")
+    ]
+    assert linked, "没有任何页面链接到研判看板,用户点不进去"

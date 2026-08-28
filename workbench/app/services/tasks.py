@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from engine.db import Store
+from engine.security import redact_for_client
 
 # 心跳超过这个秒数未更新,视为进程崩溃遗留的僵死任务,允许被抢占
 DEFAULT_STALE_AFTER_SECONDS = 3600
@@ -78,6 +79,50 @@ class TaskTracker:
         with self._lock:
             with Store(self.db_path, ensure_schema=True) as store:
                 store.task_heartbeat(task_id, self.now())
+    def update_progress(
+        self,
+        task_id: str,
+        *,
+        stage: str,
+        step: int,
+        total: int,
+        message: str,
+        detail: str = "",
+        level: str = "info",
+    ) -> None:
+        """追加真实阶段、日志和明细，页面刷新后仍可恢复。"""
+        if not stage or step < 1 or total < 1 or step > total:
+            raise ValueError("任务进度阶段或步数无效")
+        if level not in {"info", "warning", "error"}:
+            raise ValueError("任务日志级别无效")
+        now = self.now()
+        with self._lock:
+            with Store(self.db_path, ensure_schema=True) as store:
+                task = store.get_task(task_id)
+                if task is None:
+                    raise KeyError(f"任务不存在: {task_id}")
+                payload = self.parse_json(task.get("result_json")) or {}
+                steps = list(payload.get("steps") or [])
+                for item in steps:
+                    if item.get("status") == "running":
+                        item["status"] = "succeeded"
+                current = next((item for item in steps if item.get("name") == stage), None)
+                if current is None:
+                    current = {"name": stage}
+                    steps.append(current)
+                current.update({"status": "running", "detail": detail or message, "step": step, "total": total})
+                logs = list((payload.get("progress") or {}).get("logs") or [])
+                logs.append({"at": now, "level": level, "message": message, "detail": detail or message})
+                payload["steps"] = steps
+                payload["progress"] = {
+                    "stage": stage,
+                    "step": step,
+                    "total": total,
+                    "percent": int(step * 100 / total),
+                    "message": message,
+                    "logs": logs[-100:],
+                }
+                store.update_task_progress(task_id, now, self._dump(payload) or "{}")
 
     def progress(self, task_id: str, result: dict) -> None:
         """持久化当前步骤和全部已完成步骤，供刷新后恢复。"""
@@ -96,14 +141,35 @@ class TaskTracker:
         error: Optional[dict] = None,
         trade_date: Optional[str] = None,
     ) -> None:
-        """落库终态。trade_date 非空时回写,用于把幂等键对齐到真实批次。"""
+        """落库终态，并保留运行期间的阶段和日志。"""
         with self._lock:
             with Store(self.db_path, ensure_schema=True) as store:
+                existing = store.get_task(task_id)
+                if existing is None:
+                    raise KeyError(f"任务不存在: {task_id}")
+                previous = self.parse_json(existing.get("result_json")) or {}
+                merged = dict(previous)
+                merged.update(result or {})
+                previous_progress = dict(previous.get("progress") or {})
+                final_progress = dict((result or {}).get("progress") or {})
+                if previous_progress:
+                    if final_progress.get("logs"):
+                        previous_progress["logs"] = final_progress["logs"]
+                    final_progress.pop("logs", None)
+                    previous_progress.update(final_progress)
+                    merged["progress"] = previous_progress
+                previous_steps = list(previous.get("steps") or [])
+                if previous_steps:
+                    terminal_step_status = "failed" if status == "failed" else "succeeded"
+                    merged["steps"] = [
+                        {**item, "status": terminal_step_status if item.get("status") == "running" else item.get("status")}
+                        for item in previous_steps
+                    ]
                 store.finish_task(
                     task_id=task_id,
                     now=self.now(),
                     status=status,
-                    result_json=self._dump(result),
+                    result_json=self._dump(merged),
                     error_json=self._dump(error),
                     trade_date=trade_date,
                 )
@@ -132,12 +198,30 @@ class TaskTracker:
     # ------------------------------------------------------------ 工具
     @classmethod
     def decorate(cls, task: dict) -> dict:
-        """统一对外形态:补 job_id 别名,展开 result/error JSON。"""
+        """统一对外形态:补 job_id 别名,展开并脱敏 result/error。
+
+        这是任务行流向浏览器的唯一出口。两件事必须在这里做完:
+        1. 错误脱敏——不然 C:\\Users\\<用户名>\\... 这类磁盘布局会渲染到页面上;
+        2. 丢掉 result_json / error_json 原始列——它们是库内部表示,
+           留着等于把刚脱敏掉的原文又原样带出去一份。
+        """
         out = dict(task)
+        raw_result = out.pop("result_json", None)
+        raw_error = out.pop("error_json", None)
         out["job_id"] = out.get("task_id")
-        out["result"] = cls.parse_json(task.get("result_json"))
-        out["error"] = cls.parse_json(task.get("error_json"))
+        out["result"] = cls.parse_json(raw_result)
+        out["error"] = cls._redact_error(cls.parse_json(raw_error))
         return out
+
+    @staticmethod
+    def _redact_error(error: Optional[dict]) -> Optional[dict]:
+        """错误里的字符串值逐个脱敏,结构保持不变。"""
+        if not error:
+            return error
+        return {
+            key: redact_for_client(value) if isinstance(value, str) else value
+            for key, value in error.items()
+        }
 
     @staticmethod
     def parse_json(value: object) -> Optional[dict]:

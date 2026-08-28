@@ -41,6 +41,7 @@ class ExperimentService:
     def _filters(
         *,
         as_of: str | None,
+        run_id: str | None,
         group_name: str | None,
         ts_code: str | None,
         entry_status: str | None,
@@ -49,6 +50,7 @@ class ExperimentService:
         params: list[Any] = []
         for column, value in (
             ("r.as_of", as_of),
+            ("d.run_id", run_id),
             ("d.group_name", group_name),
             ("d.ts_code", ts_code),
         ):
@@ -69,6 +71,7 @@ class ExperimentService:
         self,
         *,
         as_of: str | None,
+        run_id: str | None = None,
         group_name: str | None,
         ts_code: str | None,
         entry_status: str | None,
@@ -77,6 +80,7 @@ class ExperimentService:
     ) -> dict[str, Any]:
         where, params = self._filters(
             as_of=as_of,
+            run_id=run_id,
             group_name=group_name,
             ts_code=ts_code,
             entry_status=entry_status,
@@ -95,11 +99,16 @@ class ExperimentService:
             ).fetchone()[0]
             cursor = store.con.execute(
                 f"""
-                SELECT r.as_of, r.data_cutoff_at, d.*
+                SELECT r.as_of, r.data_cutoff_at,
+                       -- 同一信号日可以跑多次（实测 20260821 跑了 3 次）。信号日只说明
+                       -- 「基于哪天的行情」，说明不了「什么时候跑的这一次」，台账上
+                       -- 同一只票重复出现却看不出区别。批次运行时间是唯一能区分的依据。
+                       r.created_at AS run_created_at,
+                       d.*
                 FROM experiment_decisions d
                 JOIN experiment_runs r ON r.run_id = d.run_id
                 WHERE {where}
-                ORDER BY r.as_of DESC, d.group_name ASC,
+                ORDER BY r.as_of DESC, r.created_at DESC, d.group_name ASC,
                          d.rank ASC NULLS LAST, d.run_id ASC, d.ts_code ASC
                 LIMIT ? OFFSET ?
                 """,
@@ -113,6 +122,26 @@ class ExperimentService:
             "page": page,
             "per_page": per_page,
         }
+
+    def batches(self) -> dict[str, Any]:
+        """已落库的实验批次，最新在前。台账的批次下拉框用它。
+
+        不能让前端从分页后的台账数据里提取批次：一页只有 200 行，更早的批次不在这一页,
+        下拉框会缺项，用户选不到自己要看的那一次。
+
+        只列 succeeded：没跑成的批次没有可看的入选结果，列出来只会让人以为有数据。
+        """
+        with self._store() as store:
+            cursor = store.con.execute(
+                """
+                SELECT run_id, as_of, created_at, finished_at,
+                       final_count, candidate_count, strategy_name
+                FROM experiment_runs
+                WHERE status = 'succeeded'
+                ORDER BY as_of DESC, created_at DESC, run_id ASC
+                """
+            )
+            return {"items": self._rows(cursor)}
 
     def detail(self, run_id: str) -> dict[str, Any]:
         with self._store() as store:

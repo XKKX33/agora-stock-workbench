@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends, Query, Response, status
 from pydantic import BaseModel
 
-from app.dependencies import get_news_collect_manager, get_repository
+from app.dependencies import (
+    get_news_collect_manager,
+    get_repository,
+    validated_signal_date,
+    validated_trade_date,
+)
 from app.services.news import DEFAULT_LIMIT, MAX_LIMIT, NewsService
 
 router = APIRouter()
@@ -68,7 +73,7 @@ def news_sources(repository=Depends(get_repository)) -> dict:
 
 @router.get("/news")
 def news_digest(
-    trade_date: str | None = None,
+    trade_date: str | None = Depends(validated_trade_date),
     include_duplicates: bool = False,
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     repository=Depends(get_repository),
@@ -87,7 +92,7 @@ def news_digest(
 @router.get("/news/stocks/{ts_code}")
 def news_for_stock(
     ts_code: str,
-    as_of: str | None = None,
+    as_of: str | None = Depends(validated_signal_date),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     repository=Depends(get_repository),
 ) -> dict:
@@ -97,7 +102,7 @@ def news_for_stock(
 
 @router.get("/news/industries")
 def news_industries_overview(
-    trade_date: str | None = None,
+    trade_date: str | None = Depends(validated_trade_date),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     repository=Depends(get_repository),
 ) -> dict:
@@ -112,8 +117,8 @@ def news_industries_overview(
 @router.get("/news/industries/{industry}")
 def news_for_industry(
     industry: str,
-    as_of: str | None = None,
-    trade_date: str | None = None,
+    as_of: str | None = Depends(validated_signal_date),
+    trade_date: str | None = Depends(validated_trade_date),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     repository=Depends(get_repository),
 ) -> dict:

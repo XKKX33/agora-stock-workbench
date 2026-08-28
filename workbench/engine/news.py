@@ -24,7 +24,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time
-from typing import Iterable, Optional, Protocol, Sequence
+from typing import Callable, Iterable, Optional, Protocol, Sequence
 
 import pandas as pd
 
@@ -161,17 +161,20 @@ def collect_news(
     exchange: str = "SSE",
     close_cutoff: time = DEFAULT_CLOSE_CUTOFF,
     half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> NewsCollectResult:
-    """采集并入库某交易日的舆情。
+    """采集并入库某交易日的舆情，按真实阶段通知调用方。"""
+    def emit(stage: str, step: int, message: str) -> None:
+        if on_progress is not None:
+            on_progress(stage=stage, step=step, total=6, message=message)
 
-    没有任何启用的采集器时返回空结果(fetched=0),由调用方标成"未配置来源",
-    而不是在这里假装采到了 0 条正常新闻——两者在页面上必须能区分。
-    """
+    emit("prepare", 1, f"准备 {trade_date} 的舆情采集，先把资讯桌面擦干净")
     enabled = [f for f in fetchers if f.source.enabled]
     result = NewsCollectResult(trade_date=trade_date)
     _register_sources(store, fetchers)
     if not enabled:
         logger.warning("没有启用的舆情来源,%s 未采集", trade_date)
+        emit("prepare", 1, "没有启用的舆情来源，资讯桌面暂时空空如也")
         return result
 
     open_dates = _calendar_window(store, exchange=exchange, trade_date=trade_date)
@@ -179,7 +182,6 @@ def collect_news(
     window_start, window_end = _collect_window(
         store, exchange=exchange, trade_date=trade_date, close_cutoff=close_cutoff
     )
-
     raws: list[RawNewsItem] = []
     for fetcher in enabled:
         source_id = fetcher.source.source_id
@@ -187,7 +189,7 @@ def collect_news(
             batch = fetcher.fetch(
                 trade_date=trade_date, window_start=window_start, window_end=window_end
             )
-        except Exception as error:  # noqa: BLE001 - 统一包装成采集失败并上抛
+        except Exception as error:
             raise NewsCollectError(
                 f"来源 {source_id} 采集失败(窗口 {window_start.isoformat()} ~ "
                 f"{window_end.isoformat()}): {type(error).__name__}: {error}"
@@ -195,17 +197,15 @@ def collect_news(
         result.sources.append(source_id)
         raws.extend(batch)
     result.fetched = len(raws)
+    emit("fetch_sources", 2, f"已抓取 {result.fetched} 条原始新闻")
     registered_source_ids = {f.source.source_id for f in enabled}
-    unknown_source_ids = sorted(
-        {raw.source_id for raw in raws} - registered_source_ids
-    )
+    unknown_source_ids = sorted({raw.source_id for raw in raws} - registered_source_ids)
     if unknown_source_ids:
-        raise NewsCollectError(
-            f"采集结果包含未登记 source_id: {', '.join(unknown_source_ids)}"
-        )
+        raise NewsCollectError(f"采集结果包含未登记 source_id: {', '.join(unknown_source_ids)}")
     if not raws:
         return result
 
+    emit("normalize", 3, "归一化新闻字段并记录拒收原因")
     rows = _normalize_items(
         raws,
         open_dates=open_dates,
@@ -217,8 +217,11 @@ def collect_news(
     if not rows:
         return result
 
+    emit("deduplicate", 4, "执行新闻去重")
     _apply_dedup(store, rows, result)
+    emit("link", 5, "关联行业和股票")
     links = _build_links(rows, universe)
+    emit("persist", 6, f"写入新闻和关联记录，共 {len(links)} 条关联")
     _persist(store, rows, links, result)
     return result
 

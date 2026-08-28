@@ -13,6 +13,18 @@
 
 from __future__ import annotations
 
+# picks = **每个信号日的当前最新名单**，不是历史批次台账。
+#
+# 主键 (as_of, strategy, ts_code) 刻意不含 run_id：同一信号日重跑时
+# `_replace_picks_in_transaction` 先按 (as_of, strategy) 整组删除再插入，只保留最后一次。
+#
+# 这跟 experiment_decisions 的语义相反，两者分工明确，别混用：
+# - picks：回测（engine/backtest.py）与 ML 训练（engine/ml/dataset.py）的输入。它们要的是
+#   「每个交易日一份不重叠的名单」——同一天留 6 份会让同一笔钱被算 6 次，净值直接虚高 6 倍。
+#   主键去重正是这个保证，加 run_id 会破坏它。
+# - experiment_decisions：主键含 run_id，每次运行独立留存，供台账逐批次追溯。
+#
+# 想看某一次运行选了什么 → experiment_decisions；想跑回测/训练 → picks。
 _PICKS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS picks (
     run_date     VARCHAR,

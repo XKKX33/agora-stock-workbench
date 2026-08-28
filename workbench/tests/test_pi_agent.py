@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 
 import httpx
@@ -20,6 +21,19 @@ from app.services.pi_agent import PiAgentClient, PiAgentProcessSupervisor, PiAge
 
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+def free_url() -> str:
+    """给 supervisor.start() 一个当前空闲的端口。
+
+    supervisor 启动前会真的探一次端口,写死 43123 会撞上本机正在跑的 Pi Agent,
+    让测试结果取决于开发机有没有开服务。这里现取一个空闲端口,测试自己隔离。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    return f"http://127.0.0.1:{port}"
 
 
 def _request(*, mode: str = "batch") -> PiAgentRequest:
@@ -235,7 +249,7 @@ def test_client_includes_redacted_error_body_for_http_failures():
 
 
 
-def test_process_supervisor_exposes_safe_start_contract(tmp_path: Path, monkeypatch):
+def test_process_supervisor_exposes_safe_start_contract(tmp_path: Path, monkeypatch, free_url: str):
     calls: list[tuple[list[str], dict[str, str], Path]] = []
 
     class Process:
@@ -260,20 +274,20 @@ def test_process_supervisor_exposes_safe_start_contract(tmp_path: Path, monkeypa
 
     monkeypatch.setattr("app.services.pi_agent.PiAgentClient", Client)
     supervisor = PiAgentProcessSupervisor(tmp_path, process_factory=factory, model_api_key_env="MODEL_KEY")
-    handle = supervisor.start(base_url="http://127.0.0.1:43123", model_api_key="hidden")
+    handle = supervisor.start(base_url=free_url, model_api_key="hidden")
     assert calls
     command, env, cwd = calls[0]
     assert cwd == tmp_path
     assert "src/main.ts" in " ".join(command)
-    assert "--port" in command and "43123" in command
+    assert "--port" in command and free_url.rsplit(":", 1)[1] in command
     assert env["PATH"]
     assert env["SYSTEMROOT"]
     assert env["PI_AGENT_INTERNAL_TOKEN"] == handle.token
     assert env["MODEL_KEY"] == "hidden"
-    assert handle.client.base_url == "http://127.0.0.1:43123"
+    assert handle.client.base_url == free_url
 
 
-def test_process_supervisor_accepts_valid_health_without_optional_status(tmp_path: Path, monkeypatch):
+def test_process_supervisor_accepts_valid_health_without_optional_status(tmp_path: Path, monkeypatch, free_url: str):
     class Process:
         pid = 123
 
@@ -303,15 +317,15 @@ def test_process_supervisor_accepts_valid_health_without_optional_status(tmp_pat
     )
 
     handle = supervisor.start(
-        base_url="http://127.0.0.1:43123",
+        base_url=free_url,
         model_api_key="hidden",
         internal_token="new-token",
     )
 
-    assert handle.client.base_url == "http://127.0.0.1:43123"
+    assert handle.client.base_url == free_url
 
 
-def test_process_supervisor_rejects_child_that_exits_before_ready(tmp_path: Path, monkeypatch):
+def test_process_supervisor_rejects_child_that_exits_before_ready(tmp_path: Path, monkeypatch, free_url: str):
     calls: list[str] = []
 
     class Process:
@@ -325,31 +339,38 @@ def test_process_supervisor_rejects_child_that_exits_before_ready(tmp_path: Path
             calls.append("terminate")
 
     class Client:
-        def __init__(self, base_url: str, _token: str, **_kwargs):
+        def __init__(self, base_url: str, _token: str, **kwargs):
             self.base_url = base_url
+            # start() 现在造两个客户端：业务客户端按业务超时（一个真实角色要跑几十秒），
+            # 就绪探测客户端短超时快速失败重试。两者超时口径不同，用它区分身份，
+            # 才能断言"两个客户端都被释放"，而不是笼统数一共 close 了几次。
+            self.label = "probe" if kwargs.get("timeout") == supervisor.readiness_probe_timeout else "client"
 
         def health(self):
             calls.append("health")
             raise PiAgentProtocolError("Pi Agent HTTP 401")
 
         def close(self):
-            calls.append("client.close")
+            calls.append(f"{self.label}.close")
 
     monkeypatch.setattr("app.services.pi_agent.PiAgentClient", Client)
     supervisor = PiAgentProcessSupervisor(tmp_path, process_factory=lambda *_args: Process())
 
     with pytest.raises(RuntimeError, match="启动后退出"):
         supervisor.start(
-            base_url="http://127.0.0.1:43123",
+            base_url=free_url,
             model_api_key="hidden",
             internal_token="new-token",
         )
 
-    assert calls == ["poll", "client.close", "terminate"]
+    # 新契约：失败路径上必须释放全部两个 httpx 客户端，否则漏掉的那个会带着
+    # 连接池一起泄漏。业务客户端随 handle.close() 走（先关连接再终止子进程），
+    # 探测客户端在 finally 里关——它是 start() 的局部资源，成功路径也一样要关。
+    assert calls == ["poll", "client.close", "terminate", "probe.close"]
     assert supervisor.handle is None
 
 
-def test_process_supervisor_closes_child_when_readiness_times_out(tmp_path: Path, monkeypatch):
+def test_process_supervisor_closes_child_when_readiness_times_out(tmp_path: Path, monkeypatch, free_url: str):
     calls: list[str] = []
 
     class Process:
@@ -363,15 +384,16 @@ def test_process_supervisor_closes_child_when_readiness_times_out(tmp_path: Path
             calls.append("terminate")
 
     class Client:
-        def __init__(self, base_url: str, _token: str, **_kwargs):
+        def __init__(self, base_url: str, _token: str, **kwargs):
             self.base_url = base_url
+            self.label = "probe" if kwargs.get("timeout") == supervisor.readiness_probe_timeout else "client"
 
         def health(self):
             calls.append("health")
             raise PiAgentProtocolError("Pi Agent HTTP 401")
 
         def close(self):
-            calls.append("client.close")
+            calls.append(f"{self.label}.close")
 
     class Clock:
         def __init__(self):
@@ -391,12 +413,13 @@ def test_process_supervisor_closes_child_when_readiness_times_out(tmp_path: Path
 
     with pytest.raises(RuntimeError, match="就绪超时"):
         supervisor.start(
-            base_url="http://127.0.0.1:43123",
+            base_url=free_url,
             model_api_key="hidden",
             internal_token="new-token",
         )
 
-    assert calls == ["poll", "health", "client.close", "terminate"]
+    # 同上：就绪超时也是失败路径，两个客户端都得释放。
+    assert calls == ["poll", "health", "client.close", "terminate", "probe.close"]
     assert supervisor.handle is None
 
 

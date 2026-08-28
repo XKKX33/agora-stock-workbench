@@ -26,21 +26,43 @@ _TOP_INDUSTRIES = 18
 _FIRST_TIER = 8
 
 
-def is_mainboard(symbol: Any) -> bool:
-    s = str(symbol)
-    return not s.startswith(_NON_MAIN_PREFIXES)
+def board_code(ts_code: Any) -> str:
+    """从 ts_code 取交易所内的数字代码。
+
+    为什么不取 snapshot 的 `symbol` 列:那一列来自 `LEFT JOIN stock_basic`,
+    某只票没有 stock_basic 行时是 NaN。而 `ts_code` 是 join 的键,恒定存在。
+    """
+    return str(ts_code).split(".", 1)[0]
+
+
+def is_mainboard(ts_code: Any) -> bool:
+    """按 ts_code 判断是否主板。
+
+    参数必须是完整 ts_code(如 `600000.SH`),不是 `symbol`。
+    """
+    return not board_code(ts_code).startswith(_NON_MAIN_PREFIXES)
 
 
 def apply_universe(snap: pd.DataFrame, universe_cfg: Dict[str, Any]) -> pd.DataFrame:
-    """按策略 universe 段过滤截面快照。返回新 DataFrame(不改原)。"""
+    """按策略 universe 段过滤截面快照。返回新 DataFrame(不改原)。
+
+    硬过滤的一条纪律:**判据缺失一律排除,不当成通过**。
+    截面是 `daily LEFT JOIN stock_basic`,某票缺 stock_basic 行时 `name` 为
+    NaN。旧实现 `name.fillna("")` 后判 ST,缺名字的票就"不含 ST"从而放行;
+    板块判据取 NaN 的 `symbol`,`str(nan)="nan"` 也不以非主板前缀开头,同样
+    放行。结果是一只信息不全、连板块都不知道的票静默进入候选池——比少一只
+    候选严重得多。现在板块改从 ts_code 推,ST 判据缺失即排除。
+    """
     df = snap.copy()
     if universe_cfg.get("exclude_st", True):
-        df = df[~df["name"].fillna("").str.contains(r"ST|\*", regex=True)]
+        # 名字缺失无法判断是否 ST,按排除处理。
+        name = df["name"]
+        df = df[name.notna() & ~name.astype(str).str.contains(r"ST|\*", regex=True)]
     price_max = universe_cfg.get("price_max")
     if price_max is not None:
         df = df[df["close"].astype(float) < float(price_max)]
     if universe_cfg.get("board", "mainboard") == "mainboard":
-        df = df[df["symbol"].map(is_mainboard)]
+        df = df[df["ts_code"].map(is_mainboard)]
     min_amount_yi = universe_cfg.get("min_amount_yi")
     if min_amount_yi is not None:
         # Tushare amount 单位=千元;1 亿元 = 100000 千元

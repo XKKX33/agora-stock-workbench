@@ -19,35 +19,34 @@ sys.path.insert(0, str(ROOT.parent))
 from workbench.engine.config import load_settings, load_strategy, resolve_path  # noqa: E402
 from workbench.engine.db import Store  # noqa: E402
 from workbench.engine.universe import (  # noqa: E402
+    apply_universe,
     build_candidates,
     industry_heat,
     industry_meta,
     is_mainboard,
 )
 
-NON_MAIN = ("300", "301", "688", "689", "8", "4", "9")
-
 
 def _funnel(snap: pd.DataFrame, uni: Dict[str, Any]) -> Dict[str, Any]:
-    """逐条硬过滤的真实淘汰量(顺序独立统计,便于展示各条口径)。"""
+    """逐条硬过滤的真实淘汰量(顺序独立统计,便于展示各条口径)。
+
+    判据缺失按排除计,与 engine.universe.apply_universe 同一口径。
+    """
     total = int(len(snap))
-    name = snap["name"].fillna("")
+    name = snap["name"]
+    is_st = name.isna() | name.astype(str).str.contains(r"ST|\*", regex=True)
     close = snap["close"].astype(float)
     amount = snap["amount"].astype(float)
     price_max = float(uni["price_max"])
     min_amt = float(uni["min_amount_yi"]) * 100_000.0
+    mainboard = snap["ts_code"].map(is_mainboard)
 
-    hit_st = int(name.str.contains(r"ST|\*", regex=True).sum())
-    hit_board = int((~snap["symbol"].map(is_mainboard)).sum())
+    hit_st = int(is_st.sum())
+    hit_board = int((~mainboard).sum())
     hit_price = int((close >= price_max).sum())
     hit_amount = int((amount < min_amt).sum())
 
-    keep = snap[
-        (~name.str.contains(r"ST|\*", regex=True))
-        & (close < price_max)
-        & snap["symbol"].map(is_mainboard)
-        & (amount >= min_amt)
-    ]
+    keep = snap[~is_st & (close < price_max) & mainboard & (amount >= min_amt)]
     return {
         "cross_section": total,
         "excluded_st": hit_st,
@@ -70,12 +69,8 @@ def main(out: str) -> None:
         snap = store.snapshot(as_of)
         funnel = _funnel(snap, uni)
 
-        m = snap[
-            (~snap["name"].fillna("").str.contains(r"ST|\*", regex=True))
-            & (snap["close"].astype(float) < float(uni["price_max"]))
-            & snap["symbol"].map(is_mainboard)
-            & (snap["amount"].astype(float) >= float(uni["min_amount_yi"]) * 100_000.0)
-        ].reset_index(drop=True)
+        # 不再手抄一遍硬过滤:口径只有 apply_universe 一处,抄第二遍就会漂移。
+        m = apply_universe(snap, uni)
 
         ind = industry_heat(m)
         heat_map, rank_map, top_inds = industry_meta(ind)

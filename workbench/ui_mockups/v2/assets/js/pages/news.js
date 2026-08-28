@@ -1,8 +1,10 @@
 import { query, request } from "/assets/js/api.js";
-import { clearError, initShell, setLoading, setStatus, showError } from "/assets/js/app-shell.js";
+import { clearError, getWorkContext, initShell, setLoading, setStatus, setWorkContext, showError, workContextParams } from "/assets/js/app-shell.js";
+import { createTaskPanel } from "/assets/js/task-panel.js";
 import { escapeHtml, formatDate, formatNumber, formatPercent, statusTag } from "/assets/js/format.js";
 
 initShell("news");
+const newsPanel = createTaskPanel(document.querySelector("#news-task-panel"), { title: "板块舆情采集进度" });
 
 // 情绪与任务状态的中文展示，null 一律按「未判定」处理，不与「中性」混淆
 const SENTIMENT = {
@@ -284,21 +286,23 @@ async function loadHistory() {
   }
 }
 
-// ---------------------------------------------------------------- 一键采集
 async function startCollect() {
   clearError();
   collectBtn.disabled = true;
+  newsPanel.reset();
   collectState.textContent = "正在排队…";
   try {
-    const tradeDate = tradeDateInput.value.trim();
-    // 409（采集未启用）/ 400（日期非法）等真实原因由 request 抛出，showError 原样展示
+    const context = getWorkContext();
+    const tradeDate = tradeDateInput.value.trim() || context.as_of || "";
+    if (tradeDate && !tradeDateInput.value.trim()) tradeDateInput.value = tradeDate;
     const job = await request("/api/news/collect", {
       method: "POST",
       body: JSON.stringify(tradeDate ? { trade_date: tradeDate } : {}),
     });
-    collectState.textContent = `任务 ${job.job_id.slice(0, 8)}… 采集中`;
-    await pollCollect(job.job_id);
-    setStatus("舆情采集完成", "ready");
+    const result = await pollCollect(job.job_id);
+    setWorkContext({ availability: "available", as_of: result?.result?.trade_date || tradeDate });
+    setStatus("板块舆情采集完成", "ready");
+    collectState.textContent = result?.result?.stored != null ? `新增 ${result.result.stored} 条 · 关联 ${result.result.links || 0} 条` : "采集完成";
     await loadDigest();
     await loadIndustries();
     await loadSources();
@@ -309,18 +313,38 @@ async function startCollect() {
     setStatus("舆情采集失败", "error");
   } finally {
     collectBtn.disabled = false;
-    collectState.textContent = "";
   }
 }
 
 async function pollCollect(jobId) {
   while (true) {
     const job = await request(`/api/news/collect/${jobId}`);
+    newsPanel.update(job);
+    const progress = job.result?.progress;
+    collectState.textContent = progress?.message || `任务 ${jobId.slice(0, 8)}… ${job.status}`;
     if (job.status === "succeeded") return job;
     if (job.status === "failed") throw new Error(job.error?.message || "舆情采集失败");
-    const [label] = JOB_STATUS[job.status] || [String(job.status || "处理中"), "pending"];
-    collectState.textContent = `任务 ${jobId.slice(0, 8)}… ${label}`;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+}
+async function resumeCollect() {
+  const data = await query("/api/news/collect/jobs", { limit: 10 });
+  const jobs = data.items || [];
+  const live = jobs.find((item) => item.status === "queued" || item.status === "running");
+  const done = jobs.find((item) => item.status === "succeeded");
+  if (live) {
+    setStatus("舆情采集已恢复", "active");
+    await pollCollect(live.job_id || live.task_id);
+    await loadDigest();
+    await loadIndustries();
+    return;
+  }
+  if (done) {
+    newsPanel.update(done);
+    const context = getWorkContext();
+    const tradeDate = done.result?.trade_date || done.trade_date || context.as_of;
+    if (tradeDate) setWorkContext({ availability: "available", as_of: tradeDate });
+    setStatus("已载入最近舆情采集", "ready");
   }
 }
 
@@ -333,7 +357,7 @@ tradeDateInput.addEventListener("change", () => {
 collectBtn.addEventListener("click", startCollect);
 
 // 情绪概览依赖舆情列表兜底，先取列表再刷新概览
-loadDigest().then(loadOverview);
+loadDigest().then(loadOverview).then(resumeCollect).catch(showError);
 loadIndustries();
 loadSources();
 loadHistory();

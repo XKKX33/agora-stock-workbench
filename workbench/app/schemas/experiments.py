@@ -62,6 +62,9 @@ class ExperimentDecision(BaseModel):
 class ExperimentListItem(ExperimentDecision):
     as_of: str
     data_cutoff_at: str
+    # 同一信号日可以跑多次，`as_of` 区分不了批次。这个字段是台账上唯一能说清
+    # 「这行属于哪一次运行」的依据，不声明的话 pydantic 会静默丢掉它。
+    run_created_at: str
 
 
 class ExperimentListResponse(BaseModel):

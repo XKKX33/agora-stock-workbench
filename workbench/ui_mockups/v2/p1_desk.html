@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>选股台 · Hermes Quant</title>
+  <title>选股台 · AGORA Quant</title>
   <link rel="stylesheet" href="/assets/css/theme.css">
   <link rel="icon" href="data:,">
   <style>
@@ -115,11 +115,14 @@
     <main class="main-shell">
       <div id="error-banner" class="error-banner" role="alert"></div>
       <header class="page-header">
-        <div><div class="eyebrow">Rule scan</div><h1>系统规则扫描</h1><p>候选、门槛和因子分均来自系统规则。</p></div>
+        <div><div class="eyebrow">Rule scan</div><h1>系统规则扫描</h1><p>候选、门槛和因子分均来自系统规则。</p>
+        <div id="desk-signal-chip" class="signal-chip">入选日期加载中…</div></div>
         <div class="button-row"><button class="button" data-scan="offline">离线扫描</button><button class="button primary" data-scan="online">更新数据并扫描</button></div>
       </header>
+      <div id="scan-task-panel"></div>
 
       <section class="panel" aria-label="候选池">
+        <div class="button-row"><a class="button primary" href="p7_news.html">进入板块舆情</a></div>
         <div class="panel-header"><div><h2>规则候选池</h2><p><span id="result-count">—</span> · 扫描状态 <span id="scan-progress" class="mono">空闲</span></p></div></div>
         <div class="filters" style="margin-bottom:14px">
           <input id="search" class="field" placeholder="代码或名称">
@@ -134,28 +137,6 @@
       </section>
 
 
-      <section class="panel" aria-label="AI 研判">
-        <div class="panel-header">
-          <div><h2>Agent 选股研判</h2><p>多角色分析与风控结论</p></div>
-          <div id="agent-status" class="agent-status">读取配置中…</div>
-        </div>
-        <div class="agent-config">
-          <label class="agent-field">候选数量<input id="agent-candidates" type="number" min="1" max="200" step="1" inputmode="numeric"></label>
-          <label class="agent-field">深度学习<input id="agent-depth" type="number" min="1" max="30" step="1" inputmode="numeric"></label>
-          <label class="agent-field">最终输出<input id="agent-final" type="number" min="1" max="10" step="1" inputmode="numeric"></label>
-          <label class="agent-force"><input id="agent-force" type="checkbox"> 强制重跑</label>
-          <button id="agent-run" class="button primary" type="button">Agent 选股研判</button>
-          <div style="flex:1"></div>
-          <div id="agent-pool-note" class="agent-pool-note"></div>
-        </div>
-        <div id="agent-progress" class="agent-progress" hidden>
-          <div class="progress-head"><span id="agent-stage">排队中</span><span id="agent-step" class="mono muted"></span></div>
-          <div class="progress-track"><div id="agent-bar" class="progress-fill"></div></div>
-          <div id="agent-message" class="mf-note" style="margin-top:6px"></div>
-        </div>
-        <div id="agent-results" class="agent-results"></div>
-        <div id="agent-recent" class="agent-recent"></div>
-      </section>
   
       <div class="desk-grid">
         <div class="col-stack">

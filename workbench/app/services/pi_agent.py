@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -62,6 +64,7 @@ class PiAgentClient:
         token: str,
         *,
         timeout: float = 180.0,
+        stream_read_timeout: float = 60.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not base_url.strip():
@@ -70,6 +73,9 @@ class PiAgentClient:
             raise ValueError("Pi Agent 内部令牌不能为空")
         self.base_url = base_url.rstrip("/")
         self._token = token
+        # 事件流与普通请求的超时语义不同：普通请求是"一次调用多久算超时"，
+        # 事件流是"两帧之间多久没动静算断流"。共用一个值会让长角色被误判。
+        self._stream_read_timeout = stream_read_timeout
         self._client = httpx.Client(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout, connect=min(15.0, timeout)),
@@ -145,11 +151,17 @@ class PiAgentClient:
         if after_source_seq < 0:
             raise ValueError("after_source_seq 不可为负数")
         try:
+            # 流读超时按 Node 侧心跳口径给（心跳 15 秒），不再沿用整段业务超时：
+            # 健康流每 15 秒必有一帧，长角色不会被误杀；真断流则在一个心跳窗口内暴露。
             with self._client.stream(
                 "GET",
                 f"/internal/v1/runs/{run_id}/events",
                 params={"after_source_seq": after_source_seq},
                 headers={**self._headers(), "accept": "text/event-stream"},
+                timeout=httpx.Timeout(
+                    self._stream_read_timeout,
+                    connect=min(15.0, self._stream_read_timeout),
+                ),
                 ) as response:
                 if response.status_code >= 400:
                     raise PiAgentProtocolError(f"Pi Agent SSE HTTP {response.status_code}")
@@ -228,6 +240,17 @@ class PiAgentProcessHandle:
         terminate = getattr(self.process, "terminate", None)
         if callable(terminate):
             terminate()
+        # 只发信号不等待的话，端口可能还没释放下一次启动就开始了，
+        # 于是撞上"端口被占"。等它真的退出，超时再强杀。
+        wait = getattr(self.process, "wait", None)
+        if not callable(wait):
+            return
+        try:
+            wait(timeout=5)
+        except Exception:
+            kill = getattr(self.process, "kill", None)
+            if callable(kill):
+                kill()
 
     def close(self) -> None:
         if self._closed:
@@ -249,6 +272,8 @@ class PiAgentProcessSupervisor:
         model_api_key_env: str = "WORKBENCH_AI_API_KEY",
         readiness_timeout: float = 10.0,
         readiness_poll_interval: float = 0.05,
+        readiness_probe_timeout: float = 1.0,
+        request_timeout: float = 180.0,
     ) -> None:
         self.workdir = Path(workdir)
         self.node_executable = node_executable
@@ -256,11 +281,27 @@ class PiAgentProcessSupervisor:
         self.process_factory = process_factory or self._default_process_factory
         self.readiness_timeout = readiness_timeout
         self.readiness_poll_interval = readiness_poll_interval
+        self.readiness_probe_timeout = readiness_probe_timeout
+        self.request_timeout = request_timeout
         self.handle: PiAgentProcessHandle | None = None
+        # 子进程崩掉后按原参数重启用；密钥只留在内存里，不写日志也不出异常。
+        self._launch: dict[str, Any] | None = None
 
     @staticmethod
     def _default_process_factory(command: list[str], env: dict[str, str], cwd: Path) -> Any:
-        return subprocess.Popen(command, cwd=str(cwd), env=env)
+        # 不能让子进程继承父进程的 stdout/stderr。父进程跑在 pty 里时，pty 一被
+        # 回收，子进程写日志就拿到 EPIPE 直接崩，而且什么痕迹都不留。写到文件
+        # 既切断这个依赖，也让崩溃原因有地方可查。
+        log_path = Path(cwd) / "pi_agent.log"
+        log_file = log_path.open("a", encoding="utf-8", buffering=1)
+        return subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
 
     def start(
         self,
@@ -268,6 +309,8 @@ class PiAgentProcessSupervisor:
         base_url: str,
         model_api_key: str,
         internal_token: str | None = None,
+        model_base_url: str | None = None,
+        model_name: str | None = None,
     ) -> PiAgentProcessHandle:
         token = internal_token or secrets.token_urlsafe(32)
         if not model_api_key:
@@ -278,8 +321,18 @@ class PiAgentProcessSupervisor:
         port = parsed.port
         if port is None:
             raise ValueError("Pi Agent base_url 必须包含固定端口")
+        # 端口固定，上一次的 node 子进程若没被回收（服务被强杀时 close() 不会执行）
+        # 会一直占着它。此时子进程只会以退出码 1 结束，真实原因被埋掉，
+        # 因此启动前先探一次，把「端口被占」直接说清楚。
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_socket:
+            probe_socket.settimeout(1.0)
+            if probe_socket.connect_ex(("127.0.0.1", port)) == 0:
+                raise RuntimeError(
+                    f"端口 {port} 已被占用，Pi Agent 无法启动。"
+                    "通常是上一次服务未正常关停留下的 node 子进程，"
+                    f"先结束占用 {port} 的进程再重启。"
+                )
         command = [self.node_executable, "--import", "tsx", "src/main.ts", "--host", "127.0.0.1", "--port", str(port)]
-        import os
         env = {
             key: os.environ[key]
             for key in ("PATH", "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
@@ -287,18 +340,22 @@ class PiAgentProcessSupervisor:
         }
         env[self.model_api_key_env] = model_api_key
         env["PI_AGENT_API_KEY"] = model_api_key
-        env["PI_AGENT_BASE_URL"] = "https://api.pie-xian.com/v1"
-        env["PI_AGENT_MODEL"] = "minimax-m3"
+        env["PI_AGENT_BASE_URL"] = model_base_url or "https://api.pie-xian.com/v1"
+        env["PI_AGENT_MODEL"] = model_name or "minimax-m3"
         env["PI_AGENT_INTERNAL_TOKEN"] = token
         env["PI_AGENT_TOKEN"] = token
         env["PI_AGENT_PORT"] = str(port)
+        # 父进程被强杀时 close() 不会执行，子进程就会一直占着固定端口，
+        # 下次启动必然冲突。让子进程自己盯着这个 PID，父进程没了就退出。
+        env["PI_AGENT_PARENT_PID"] = str(os.getpid())
         process = self.process_factory(command, env, self.workdir)
-        client = PiAgentClient(
-            base_url,
-            token,
-            timeout=min(1.0, max(self.readiness_poll_interval, self.readiness_timeout)),
-        )
+        # 业务客户端：真实模型单个角色要跑几十秒，实测 SSE 事件间隔可达 45 秒，
+        # 超时必须按业务口径给。这个客户端会交给 AgentJudgeManager 与
+        # PipelineManager 长期持有，绝不能沿用就绪探测的短超时。
+        client = PiAgentClient(base_url, token, timeout=self.request_timeout)
         handle = PiAgentProcessHandle(process, client, token, base_url)
+        # 探活客户端独立且短超时：健康检查该快速失败快速重试，用完即关。
+        probe = PiAgentClient(base_url, token, timeout=self.readiness_probe_timeout)
         deadline = time.monotonic() + self.readiness_timeout
         last_error: BaseException | None = None
         try:
@@ -307,8 +364,9 @@ class PiAgentProcessSupervisor:
                 if exit_code is not None:
                     raise RuntimeError(f"Pi Agent 子进程启动后退出，退出码 {exit_code}")
                 try:
-                    client.health()
+                    probe.health()
                     self.handle = handle
+                    self._launch = {"base_url": base_url, "model_api_key": model_api_key}
                     return handle
                 except PiAgentProtocolError as exc:
                     last_error = exc
@@ -320,6 +378,24 @@ class PiAgentProcessSupervisor:
             handle.close()
             self.handle = None
             raise
+        finally:
+            probe.close()
+
+    def ensure_alive(self) -> PiAgentProcessHandle | None:
+        """确认子进程还活着，死了就用原参数重启。
+
+        可用状态是启动那一刻的快照，子进程之后崩掉不会有人改它。不复检的话，
+        系统会一直宣称 Pi Agent 可用，直到真正调用才炸出 502。
+        """
+        if self.handle is None:
+            return None
+        if self.handle.process.poll() is None:
+            return self.handle
+        logger.warning("Pi Agent 子进程已退出，正在按原参数重启")
+        self.handle = None
+        if self._launch is None:
+            return None
+        return self.start(**self._launch)
 
     def close(self) -> None:
         if self.handle is not None:

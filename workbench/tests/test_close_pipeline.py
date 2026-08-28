@@ -24,10 +24,13 @@ from engine.close_pipeline import (
     run_close_pipeline,
 )
 from engine.db import Store
+from engine.visibility import DEFAULT_DELAY_SESSIONS
 from tests.test_run_scan_offline import _TRADE_DATES, _seed_db
 
-# 可见日 = 基准日往前退 20 个开市日,与 settings 默认 visibility_delay_sessions 一致
-VISIBLE_AS_OF = _TRADE_DATES[-21]
+# 可见日 = 基准日往前退 DEFAULT_DELAY_SESSIONS 个开市日。这里绑代码默认值而不是
+# settings.yaml:隐藏窗口是运营可调参数(舆情源只能采实时数据,生产上可能调成 0
+# 让选股截面与舆情对齐),而这条用例锁的是"截面等于传入日期"这个代码契约。
+VISIBLE_AS_OF = _TRADE_DATES[-(DEFAULT_DELAY_SESSIONS + 1)]
 
 pytestmark = pytest.mark.integration
 

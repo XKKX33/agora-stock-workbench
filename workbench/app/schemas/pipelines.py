@@ -1,6 +1,8 @@
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.schemas.scans import validate_optional_strategy
 
 
 class PipelineRequest(BaseModel):
@@ -14,6 +16,8 @@ class PipelineRequest(BaseModel):
     force: bool = False
     # ignore_gate=True 只跳过"还没到运行时间";日历缺失或过期依旧拒绝运行
     ignore_gate: bool = False
+
+    _check_strategy = field_validator("strategy")(validate_optional_strategy)
 
 
 class PipelineAccepted(BaseModel):
@@ -37,6 +41,8 @@ class PipelineBackfillRequest(BaseModel):
     online: Optional[bool] = None
     # force=True 绕过"同一批次已成功"的幂等拦截,逐日抢占也一并强制
     force: bool = False
+
+    _check_strategy = field_validator("strategy")(validate_optional_strategy)
 
 
 class PipelineBackfillAccepted(BaseModel):

@@ -92,9 +92,10 @@ OneClickRunner 串联：`preflight` → `calendar` → `market_data` → `backfi
 ### 防未来数据泄漏
 
 - T+N 独立收益按 `trade_cal` 市场交易日定位：T+1 开盘买入，T+1 收盘卖出得到 `t1_close`；后续交易日开盘分别得到 `t2_open`…`t10_open`。v1 不计手续费、印花税和滑点。
-- 为给 T+1~T+10 的收益留出完整落地空间，系统默认隐藏最近 20 个交易日；这样历史批次才能被真实评估，避免把“还没来得及确认”的目标日过早算进去。
+- 隐藏窗口的天数由 `data.visibility_delay_sessions` 控制，是**运营可调参数**而非固定常量。代码默认 20（给 T+1~T+10 留出完整落地空间，历史批次才能被真实评估）；当前生产配置为 0，因为舆情源（TrendRadar 热榜）只能采实时数据、无法回溯历史，退 20 个交易日会让选股截面永远早于全部舆情、舆情分析师恒定拿到 0 条。代价是收益数字不再具备防前视保证，只反映实盘选股口径。
+- 因为它可调，测试不能继承生产值：`tests/api/conftest.py` 的 `offline_settings` 把它钉死在代码默认值上。否则「隐藏窗口内的日期必须被拒」这类用例在 delay=0 时窗口是空的，断言无事可验、闸门坏了也发现不了。
 - 请求隐藏日期时直接拒绝，不静默改写成别的日期；静默改写会让调用方误以为拿到的就是自己要的那天，是最坏的降级。
-- 在线仍要持续摄取最新交易日，因为可见日 = 基准日往前退 20 个交易日；只有最新截面不断进来，可见窗口才会往前推，历史可见范围才会逐步释放。
+- 在线仍要持续摄取最新交易日：可见日 = 基准日往前退 N 个交易日，只有最新截面不断进来，可见窗口才会往前推，历史可见范围才会逐步释放。
 
 ### 舆情快照归属
 
@@ -115,6 +116,49 @@ OneClickRunner 串联：`preflight` → `calendar` → `market_data` → `backfi
 - `task_runs` 的读写统一收在 `app/services/tasks.py` 的 `TaskTracker`：抢占、心跳、落终态、按 `kind` 查历史、JSON 列解析与字段装饰只有一份实现。`ScanManager`（`kind="scan"`）与 `PipelineManager`（`kind="close_pipeline"`）都走这一层，只保留各自的执行体与 HTTP 语义（错误码、僵死阈值）。两个 Manager 各抄一份装饰逻辑必然漂移，而漂移的表现是页面上某类任务少一个字段，很难定位。
 - `picks` 主键为业务幂等键 `(as_of, strategy, ts_code)`（`as_of` 是横截面日期，`run_date` 只是写入时间）。旧库启动时自动迁移：去重保留最新 `run_date`，全程事务，失败回滚。
 - `experiment_decisions` 的 16 个旧列（`entry_date` / `entry_price` / `entry_status` / `entry_reason` / `ret{1,3,5,10}` 及其 `_target_date` / `_status` / `_reason`）已从 DDL 删除。`Store(ensure_schema=True)` 每次开库执行 `_drop_legacy_decision_columns()`：只 DROP 还残留的旧列，一个事务、幂等，决策数据不动（已在真实库副本与带数据的合成老库上验证）。留着旧列的代价是两套收益口径并存、页面读哪一套都可能对不上。
+- `experiment_runs` / `agent_runs` 的收尾写在流程函数尾部，进程被强杀（关控制台、任务管理器结束、断电、Pi Agent 超时后服务退出）就永远不执行，状态永久停在 `running`。库里的 `running` 因此区分不出「正在跑」和「跑它的进程早就死了」——实测真实库里积了 14 个僵死实验批次和 2 个僵死 Agent 运行，最早的来自两周前的调试。`task_runs` 早有心跳僵死回收，这两张表没有，是同一份保证漏了两张表。
+- 现在 `app/main.py:reclaim_stale_runs()` 在启动迁移之后、任何流程线程启动之前收尾残留：`Store.reclaim_stale_experiment_runs()` 按 `created_at` 判定，`Store.reclaim_stale_agent_runs()` 按 `COALESCE(heartbeat_at, created_at)` 判定（`experiment_runs` 没有 `heartbeat_at` 列，不为此加列迁移）。落 `status='failed'` 并写明 `error_json` 是「进程中断」而非业务失败——两者排查方向完全不同。
+- 启动路径 `max_idle_seconds=0`：DuckDB 是单写者，本进程能打开库写就证明没有并行写进程（否则迁移已经失败），此刻未收尾的批次一定是残留，留窗口只会让残留多活两小时。判定用 `<=` 而不是 `<`，否则窗口为 0 时会漏掉与 `now` 同一时刻创建的批次，而那正是「刚建完就被强杀」的情况。
+
+### 一次运行的结果保存在哪（两种语义并存，别混用）
+
+一次九步流程落进 5 张表，其中**累积**与**覆盖**两种保存语义同时存在。不写清就会误判——
+比如看到 `picks` 里 8/21 只有 6 行，以为那天只跑了一次，实际跑了 6 次。
+
+**累积：每次运行独立留存，主键含 `run_id`**
+
+| 表 | 存什么 | 8/21 跑 6 次后 |
+|---|---|---|
+| `experiment_runs` | 批次元数据：`as_of` / `created_at` / 候选数 / `candidate_hash` / 混合权重 | 6 行 |
+| `experiment_decisions` | 四组名单（规则 / AI / 混合 / 基准） | 6 份，各自独立 |
+| `experiment_returns` | 成交与 T+1~T+10 收益，由后续运行的 `backfill_returns` 步补 | 6 份 |
+| `agent_runs` / `agent_judgments` / `agent_events` | Agent 批次、终稿判断、公开辩论事件流 | 6 份 |
+
+**覆盖：同一 `(as_of, strategy)` 只留最后一次，主键不含 `run_id`**
+
+| 表 | 存什么 | 8/21 跑 6 次后 |
+|---|---|---|
+| `picks` | 该信号日的**当前最新**选股名单 | 只剩最后一次的 6 行 |
+| `scan_runs` / `scan_rows` | 该信号日的**当前最新**扫描明细 | 只剩最后一次 |
+
+**为什么 `picks` 必须覆盖**：它是回测（`engine/backtest.py`）与 ML 训练
+（`engine/ml/dataset.py`）的输入，两者要的是「每个交易日一份不重叠的名单」。同一天留 6 份，
+同一笔钱会被算 6 次，净值直接虚高 6 倍。主键 `(as_of, strategy, ts_code)` 去重正是这个保证，
+加 `run_id` 会破坏它。
+
+**该读哪张表**：想看「某一次运行选了什么」→ `experiment_decisions`（台账页按批次分段用的就是它）；
+想跑回测或训练 → `picks`。
+
+**幂等边界**：同一 `run_id` 已是 `succeeded` 时 `record_experiment` 直接返回，不重复写；
+已是 `failed` 的 `run_id` 不允许复用——失败批次的元数据不可信，必须换新 `run_id`。
+
+### 买入日行情补采
+
+- 每轮扫描只回补**当轮候选池**的日线（`run_scan._backfill_history`），全市场截面只覆盖扫描当天。于是更早批次的票在后续买入日整片缺行：实测 20260721 全市场只入库 1019 行，前一交易日有 5524 行。
+- 缺行的票成交状态判为 `entry_bar_missing`。这个状态**不是终局**：它是可修复的摄取缺口，不是「买不到」的市场事实。当终局会让样本在补齐日线后也不再重算，收益永远算不出。终局只有两种——`filled`（买到，`entry_price` 有值）和 `entry_unavailable`（封板买不到，市场事实）。
+- 判定收敛在两处常量派生：`db_experiments._ENTRY_UNAVAILABLE_STATUSES` 与 `classify_entry_status()`，加上 `experiment_entries_awaiting_limits()` 的待补清单查询。三处同源，改一处不会漂。
+- `engine/experiments.required_entry_bar_codes()` 与 `required_entry_limit_dates()` 对称：前者补日线本身，后者补涨跌停价。都只报「买入日已走到已入库范围、却确实缺数据」的情形；买入日还没到属于「等未来」，补采解决不了，一律跳过。
+- 一键链的 `backfill_returns` 步骤先补涨跌停价、再补日线，然后才算收益；离线时明确告警而不静默跳过。返回体带 `required_entry_bar_codes` 与 `entry_bar_rows`，页面能看出补了多少。
 
 ### 失败显式暴露
 
@@ -132,6 +176,8 @@ OneClickRunner 串联：`preflight` → `calendar` → `market_data` → `backfi
 ### 前端与图表
 
 - K 线页用本地 ECharts（无 CDN、离线可用），指标全部后端算好返回，前端只负责渲染与交互（十字光标、指标副图）。
+- 技术指标预热口径统一：所有指标一律「第 n 根起才有值，之前留空」，跟 `rolling(n)` 同语义。`rolling` 天生如此，`ewm` 不是——它从第一根就吐数，首日 `ema12==ema26==close` 会让 `dif/macd` 恰好是 `0.0`，画在图上是一条贴着零轴的线，看着像「多空平衡」的真实信号，其实只是还没算出来。`kline.py` 的 `_mask_warmup()` 负责把 `ewm` 类指标的预热段掩成 NaN；门槛为 `dif` 26 根、`dea/macd` 34 根（26 根 EMA 之后还要 9 个 `dif`）、`KDJ` 9 根（`rsv` 用 `rolling(9)`）、`rsi6` 6 根。
+- 喂给 AI 的指标走同一套门槛：`agents_data.py` 的 `_daily_brief()` / `_weekly_brief()` / `_macd_state()` 在样本不足时返回 `None` 或空字符串，绝不把预热噪音当既成事实交给模型。周线 MACD 需 34 根周线（约 8 个月日线）。判断依据是「够不够样本」，不是「算不算得出数」——`tail(60).mean()` 在 9 根数据上也能算出一个数，但那不是 60 日均线。
 - 设计令牌与参考对象调研沉淀在 `workbench/docs/ui-design-reference.md`，页面主题统一深色科技感，涨红跌绿符合 A 股习惯。
 - 主题令牌分层：`theme.css` 定义基础令牌（`--bg`/`--surface`/`--navy`/`--text` 为测试锁定值，不可改）与渐变光效（青蓝→紫双色 radial-gradient、科技网格、紫光悬停），各页私有样式只叠加页面级渐变，不覆盖基础令牌——保证换肤不动四令牌、UI 测试稳定。
 - 自选股：`watchlist` 表以 ts_code 为主键，增删幂等（重复添加/删除不报错）；列表接口把自选与行情、行业、最新交易日联表，`sort_order` 保持手工添加顺序；股票不存在时添加返回 404，不让假数据进自选。
@@ -152,13 +198,73 @@ OneClickRunner 串联：`preflight` → `calendar` → `market_data` → `backfi
 
 ### 多 agent 短线研判
 
-- 两级混合结构：① 粗筛用方法论文本 prompt 对候选池全体打分（单次模型调用）；② 深度分析对前 N 只并行跑方法论/舆情/走势三位分析师（加权 0.4/0.3/0.3）+ 决策汇总；③ 最终 M 只做多方/空方陈述 + 中性风控一轮精简辩论。
+- 两级混合结构：① 候选池由规则方法论（`engine/methodology.py`）从全市场排序取 Top20，不再用模型做粗筛排序；② 深度分析对这 20 只**全部**跑方法论/舆情/走势三位分析师；③ 这 20 只**全部**进四轮公开辩论，按风控主席评分降序取最终 3 只。前端从选股页传入 `run_id`、`as_of` 与通过候选，管理器按指定扫描批次冻结输入并把批次身份纳入任务幂等键。
 - 短线口径：提示词淡化中线基本面，强调情绪阶段/题材热度/量价/资金；输入全部来自已入库数据（`/api/stocks`、`/api/kline` 指标、`/api/news/*`）。舆情不新增采集器，只做相关性/时效/来源可信度过滤与评估，未匹配行业的新闻如实标注。
-- 参数钳制：面板可改但后端按 `settings.yaml` 的 `agent:` 段上限钳制（候选 200 / 深度 30 / 最终 10），防止超长任务打爆模型。
-- 落库与幂等：结果写 `agent_runs`（run_id/参数/状态）与 `agent_judgments`（股票/阶段/分数/理由/风险/原始 JSON）；同一 as_of + 同一组参数已成功则复用并带 `reused=True`，抢占失败带冲突行。
+- 参数钳制：面板可改但后端按 `settings.yaml` 的 `agent:` 段上限钳制（候选 20 / 深度 20 / 最终 3），防止超长任务打爆模型。20 只全部参辩后单次运行约 140 次模型调用，上限不宜再放大。
+- 落库与幂等：结果写 `agent_runs`（run_id/参数/状态）与 `agent_judgments`（股票/阶段/分数/理由/风险/原始 JSON）；同一选股批次、信号日和参数的成功研判复用并带 `reused=True`，抢占失败带冲突行。
 - 未配置即显式失败：AI 未启用/未配置时 `POST /api/agents/judge` 与 `POST /api/agents/single` 返回 503，绝不走规则模板降级、绝不编造结论；已完成结果可用 `GET /api/agents/results` 按 `as_of` 过滤查看。
+
+### Pi Agent 方法论下发与四轮公开辩论
+
+- 职责切分：`engine/methodology.py` 持有**方法论正文 + 七个角色职责**，`pi_agent/src/provider.ts` 只持有**输出 JSON schema 契约**。方法论随每次 `JudgmentRequest` 的 `methodology` 字段下发，改方法论只改 Python 一处，不存在两处静默不一致。
+  - 该字段必须进 `contracts.ts` 的 `validateJudgmentRequest` 返回白名单，否则会被静默丢弃。
+  - 缺任何一个角色职责直接拒绝执行（Python 侧 `_self_check()`，TS 侧 `validateMethodology`），不做「缺了就用默认提示词」的降级。
+- 角色命名统一为 `methodology / sentiment / trend`（原 Pi 侧 `technical` 已改名）+ `bull / bear / bull_counter / risk_chair`，与前端 p13 六格辩论面板的词表一致。
+- 四轮公开辩论：`workflow.ts` 的 `runPublicDebate` 按 `bull → bear → bull_counter → risk_chair` 串行执行，每轮把此前所有发言作为累积 transcript 传入，风控席位据全场定稿。移植自 `engine.agents.run_public_debate`。
+- 缺失即缺失：任一轮没产出有效结论，该股票不进最终名单（记 `message.failed`），不合成占位文本；前端终稿面板对缺失段落显式标注「缺失：该轮辩论未产出」。
+- 前端实时渲染必须累积事件后整体重渲染（`liveEvents` 缓冲），只把新到的一条交给渲染器会清空其余五格与整条时间线。
+- **规则初选 Top20 全部参辩，前三名由风控评分产生**：原先在深度分析之后还有一个 `debate`
+  角色，职责是把候选排序并挑出前 N 进辩论。那是第二次排序——规则方法论已经从全市场排到
+  Top20 了——而它恰好是整条链最脆的一环：实测一次结构化输出失败（`selected must be an
+  array`）就让后面四轮辩论压根不开始，前面 60 次分析师调用全部作废。现已删除：20 只全部
+  参辩，按 `risk_chair.score` 降序取前三。同分保持规则分顺序，结果可复现。
+- **风控结论只能看多或看空**：`VERDICTS` 不含「中性」。这份名单要拿去和规则组比收益，
+  一份全是「中性」的名单比不出任何东西。评分缺失或越界直接失败，不回落到规则分——
+  那等于让规则分冒充辩论结论，名单看着正常，实际根本不是辩出来的。
+- **辩论论点允许纯文本**：论点是给人读的文本。模型讲清了道理却没套 JSON 外壳时，整段原文
+  就是论点（`call` 把原文放在 `_text` 键带回）。但风控结论要进台账参与收益对比，仍必须是
+  结构化输出。一句话都没说、或断流，两者都失败，绝不编占位文本。
+- **断流重试必须退避**：断流多是上游瞬时过载，立刻重试等于往还没缓过来的服务上再捅一刀
+  （实测连打三次三次全断）。改为指数退避 2s、4s。`runWorkflow` 的 `retryBackoffMs` 参数
+  仅供测试注入，生产不传。
+- **分析与辩论有界并发**：每只股票互不依赖，串行纯属浪费。实测串行跑完 20 只要 140 分钟，
+  并发 4 路后降到 13 分钟（快 10.8 倍）。不用 `Promise.all` 全放出去是因为上游按并发限速，
+  20 路齐发会撞 429，而 429 在本工作流里表现为断流。并发数由 `PI_AGENT_CONCURRENCY` 调，
+  默认 4，上限 16。结果按输入下标回填，输出顺序与串行完全一致。
+- **辩手提示词必须给长度上限**：`max_tokens` 已是模型硬上限 8192，仍有 7/20 死在
+  `returned truncated output (max_tokens)`；同一次运行里 `risk_chair` 一次没截断，差别就是
+  它的 thesis 写了 "under 80 characters"。辩手拿到完整 transcript 逐条反驳，不给界就一直写。
+  加 "under 300 characters" 后截断从 7 次降到 1 次，辩论成功率 65% → 90%。
+- **看空的股票不进买入名单**：名单语义是「次日开盘买入」——每一条决策都会回填 T+N 收益，
+  拿去和规则组比谁赚得多。风控判「看空」就是明确说别买，把它记成买入决策，那组收益既不
+  代表 AI 判断也不代表任何可执行策略。实测一次真实运行 20 只里 19 只看空，不过滤方向的话
+  AI 组前三有 2 只是看空的。过滤必须在取前三**之前**（`workflow.ts` 的 `bullish`）：先截断
+  再过滤等于让看空的把看多的挤出名单。
+  - 全部看空返回**空名单**而不是报错：模型认真跑完了，结论就是这批都不该追，这是有效结论。
+    「一只都没辩成」（`scored` 为空）才是真故障，仍然抛错——两者必须能分辨。
+  - Python 侧 `_require_bullish_final` 遇到非看多**拒绝**而不是静默丢弃：上游已保证只送看多，
+    这里出现看空就是契约被破坏。静默丢弃会让「AI 组只剩 1 只」看起来像模型没辩成。
+- **混合组的 AI 那一半必须来自辩论评分**：`deep` 阶段的 `score` 就是候选传入的规则分
+  （`deep.push({... score: item.score ...})`，`item` 来自 `coarse`），辩论评分只存在于 `final`。
+  原先混合组取 `deep` 的 score 当 `ai_score`，于是 `ai_percentile` 与 `rule_percentile` 恒等，
+  加权等于没加——线上实测 hybrid 三只与 rule 三只完全相同、`ai_score == rule_score`，
+  三组对比里有两组是同一个东西。现改用 `final`，理由字段同步按 final 取
+  （`thesis/verdict/action`），否则 `points/analysts` 一个都不存在、理由恒空。
+  只有辩成的股票有辩论评分，没辩成的不进混合组：给它们补分就是编造 AI 判断。
+- **进度总步数按全部候选算**：排序环节删除后 20 只全部参辩，`total_steps` 仍按 `final_n`
+  算的话进度条会早早跑满被钳在 100%，后面十几分钟看着像卡死。
+- **辩论矩阵必须按股票分组**：20 只候选共用同一批角色名
+  （`methodology/sentiment/trend/bull/bear/bull_counter/risk_chair`）。p13 看板原先只按角色
+  去重（`latest.set(event.role, event)`），后跑完的股票覆盖先跑完的——实测一屏里方法论/舆情/
+  走势讲 `002209.SZ`、多方讲 `000703.SZ`、空方与反驳讲 `001337.SZ`、风控又回到 `000703.SZ`，
+  六格拼出一场根本不存在的辩论，而页面看起来完全正常。
+  - p13 新增股票选择器（`#matrix-stock-select`）：选哪只就只显示那只的六格与风控结论。
+    切批次时 `resetMatrixStock()` 重置选中项，否则上一批的代码会把新批次面板判成空。
+  - 分组逻辑抽成纯函数 `matrixStockCodes` / `latestByRoleForStock`（不碰 DOM），
+    测试用 node 真跑它们而不是断言源码文本——文本断言守不住行为。改回旧写法测试立刻变红。
+  - 总览页（`overview.js`）是「最新动态」性质，不做选择器，但每格加 `【代码】` 前缀标明
+    这条发言属于哪只股票。不标的话六格看起来像在讲同一只，实际可能来自六只不同的票。
 
 ## 已知待办
 
-- 除流程页可从任务历史展开指定批次外，其余页面仍主要查询最新全局扫描，尚未统一固定 `run_id`。
 - 舆情来源扩展（TrendRadar 之外更多来源待核验）。

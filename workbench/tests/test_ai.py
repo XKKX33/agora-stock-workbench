@@ -141,15 +141,30 @@ def test_api_key_env_defaults():
 def test_default_settings_use_supplied_provider_without_storing_secret():
     settings = load_settings()
 
-    assert settings["ai"]["base_url"] == "https://api.pie-xian.com/v1"
+    assert settings["ai"]["base_url"] == "https://cpa.xuan.christmas/v1"
     assert settings["ai"]["model"] == "minimax-m3"
     assert settings["ai"]["api_key_env"] == "WORKBENCH_AI_API_KEY"
     assert "api_key" not in settings["ai"]
-    assert settings["agent"]["base_url"] == "https://api.pie-xian.com/v1"
+    assert settings["agent"]["base_url"] == "https://cpa.xuan.christmas/v1"
     assert settings["agent"]["api_key_env"] == "WORKBENCH_AI_API_KEY"
     assert settings["agent"]["enabled"] is True
     assert settings["agent"]["reasoning_effort"] == "low"
-    assert settings["agent"]["max_tokens"] == 1200
+    # max_tokens 是运营可调的输出预算:推理模型的思考 token 也计入输出,辩论
+    # 角色还要带完整 transcript 逐条反驳,按实测调大调小属日常运营,具体数值
+    # 不是契约。写死 1200 会让每次调参都误伤这条用例——而按用例名,它真正要
+    # 守的是"出厂配置指向指定 provider 且不落盘明文密钥"。
+    #
+    # 保留下来的契约:出厂 agent 段必须能过设置接口自己声明的边界(当前
+    # ge=100、le=32000)。越界才是真缺陷——UI 一保存就 422,PiModelConfig
+    # 一构造就抛。用 AgentSettingsIn 复核而不是在测试里复写数字,边界日后
+    # 调整时这条断言自动跟随,不会变成第二处需要同步的事实来源。
+    from app.api.settings import AgentSettingsIn
+
+    assert isinstance(settings["agent"]["max_tokens"], int)
+    assert (
+        AgentSettingsIn(**settings["agent"]).max_tokens
+        == settings["agent"]["max_tokens"]
+    )
     assert "api_key" not in settings["agent"]
 
 
@@ -449,8 +464,8 @@ def test_chat_stream_accepts_usage_chunk_after_finish():
 
 def test_configured_default_endpoint_is_grok():
     settings = load_settings()
-    assert settings["ai"]["base_url"] == "https://api.pie-xian.com/v1"
-    assert settings["agent"]["base_url"] == "https://api.pie-xian.com/v1"
+    assert settings["ai"]["base_url"] == "https://cpa.xuan.christmas/v1"
+    assert settings["agent"]["base_url"] == "https://cpa.xuan.christmas/v1"
     assert settings["ai"]["model"] == "minimax-m3"
 
 

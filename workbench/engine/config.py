@@ -78,9 +78,34 @@ def _normalize_money_overlay(overlay: Dict[str, float]) -> Dict[str, float]:
     return out
 
 
+class StrategyNotFound(ValueError):
+    """请求的策略在 config/strategies 下不存在。
+
+    带上可选项:用户拼错策略名时该看到"有哪些能选",而不是一条服务器路径。
+    """
+
+    def __init__(self, name: str, available: list[str]) -> None:
+        self.name = name
+        self.available = available
+        options = "、".join(available) if available else "(无)"
+        super().__init__(f"策略不存在: {name}；可选: {options}")
+
+
+def available_strategies() -> list[str]:
+    """config/strategies 下已登记的策略名,按字母序。"""
+    return sorted(p.stem for p in (CONFIG_DIR / "strategies").glob("*.yaml"))
+
+
 def load_strategy(name: str) -> Dict[str, Any]:
-    """加载策略并展平为打分层需要的结构。"""
-    raw = _read_yaml(CONFIG_DIR / "strategies" / f"{name}.yaml")
+    """加载策略并展平为打分层需要的结构。
+
+    策略不存在时报出可选项,而不是让 FileNotFoundError 把服务器绝对路径
+    带到调用方——那个报错既泄露磁盘布局,又没告诉用户该填什么。
+    """
+    path = CONFIG_DIR / "strategies" / f"{name}.yaml"
+    if not path.is_file():
+        raise StrategyNotFound(name, available_strategies())
+    raw = _read_yaml(path)
     raw["money_overlay"] = _normalize_money_overlay(raw.get("money_overlay", {}))
     raw.setdefault("strategy_name", name)
     return raw

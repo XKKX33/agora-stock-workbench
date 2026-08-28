@@ -6,7 +6,8 @@
     1. 粗筛   —— 方法论 prompt 单次调用,把 N 只候选压缩成 depth 只
     2. 深度学习 —— 每只股票并行跑三位分析师(方法论 / 舆情 / 走势),
                    程序化加权汇总,选出 final_count 只
-    3. 辩论   —— 每只最终股:多空辩论一回合 + 中性风控定稿
+    3. 辩论   —— 每只最终股:多空辩论一回合 + 风控定稿(只能看多或看空,
+                   不允许中性——定稿的职责就是给方向)
 
 硬约束:
 - 输入只用已入库数据(由调用方装配),引擎不碰数据库;
@@ -19,17 +20,15 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 from engine.ai import (
     AIConfig,
     AIUnavailableError,
     OpenAICompatibleClient,
     describe,
-    load_ai_config,
 )
 from engine.config import load_settings
 from engine.methodology import METHODOLOGY
@@ -182,10 +181,12 @@ _SYSTEM_DEBATE = f"""你是多空辩论研究员。基于三位分析师(方法�
 输出 JSON(只输出 JSON 对象):
 {{"bull": "多方理由,分条用分号隔开", "bear": "空方理由,分条用分号隔开"}}"""
 
-_SYSTEM_RISK = f"""你是最终决策人,立场中性,只做风控定稿。综合多空辩论与三位分析师观点,给出这只股票的最终短线结论。
+_SYSTEM_RISK = f"""你是最终决策人,只做风控定稿。综合多空辩论与三位分析师观点,给出这只股票的最终短线结论。
 原则:风险优先,宁可错过不可做错;回撤控制优先于收益弹性;观点矛盾时取保守一侧。
+verdict 只能是"看多"或"看空",不允许"中性":你的职责就是给出方向,说不清方向等于没做定稿。
+风险大就写"看空",不要用中性回避表态。
 输出 JSON(只输出 JSON 对象):
-{{"verdict": "看多|中性|看空", "score": 0到100的整数, "thesis": "不超过80字的核心逻辑", "risks": ["风险点,1~3条"], "action": "短线操作建议,不超过40字"}}"""
+{{"verdict": "看多|看空", "score": 0到100的整数, "thesis": "不超过80字的核心逻辑", "risks": ["风险点,1~3条"], "action": "短线操作建议,不超过40字"}}"""
 
 
 # ------------------------------------------------------------------ JSON 容错解析
@@ -287,8 +288,9 @@ def _public_content(role: str, parsed: dict) -> tuple[dict, list]:
         for key in ("verdict", "score", "thesis", "risks", "action"):
             if key not in parsed:
                 raise AgentOutputError(f"公开角色 risk_chair 缺少字段 {key}")
-        if parsed["verdict"] not in ("看多", "中性", "看空"):
-            raise AgentOutputError("公开角色 risk_chair 的 verdict 无效")
+        # 只能看多或看空:允许中性等于允许交白卷,而这份名单要拿去和规则组比收益。
+        if parsed["verdict"] not in ("看多", "看空"):
+            raise AgentOutputError(f"公开角色 risk_chair 的 verdict 只能是看多或看空,实际:{parsed['verdict'] or '(空)'}")
         _score(parsed["score"], "公开角色 risk_chair 的 score")
         if not isinstance(parsed["risks"], list):
             raise AgentOutputError("公开角色 risk_chair 的 risks 必须是列表")
@@ -443,13 +445,19 @@ def _debate_one(client: OpenAICompatibleClient, config: AgentConfig, snapshot: d
     debate = parse_json_response(client.chat([{"role": "system", "content": _SYSTEM_DEBATE}, {"role": "user", "content": f"三位分析师观点:\n{payload}"}], json_mode=True))
     final = parse_json_response(client.chat([{"role": "system", "content": _SYSTEM_RISK}, {"role": "user", "content": f"多空辩论:\n{json.dumps(debate, ensure_ascii=False)}\n三位分析师观点:\n{payload}"}], json_mode=True))
     score = _score(final.get("score"), "最终决策人的 score")
-    verdict = _text(final.get("verdict"), "中性")
-    if verdict not in ("看多", "中性", "看空"):
-        verdict = "中性"
+    # 原先这里解析不出 verdict 就填"中性",thesis 缺失就填"暂无核心逻辑"。
+    # 那是把模型没给出的判断伪造成一条真实结论,而这份名单要拿去和规则组比收益。
+    # 现在只接受看多/看空:定稿的职责就是给方向,给不出就让这只股票失败。
+    verdict = _text(final.get("verdict"))
+    if verdict not in ("看多", "看空"):
+        raise AgentOutputError(f"最终决策人的 verdict 只能是看多或看空,实际:{verdict or '(空)'}")
+    thesis = _text(final.get("thesis"))
+    if not thesis:
+        raise AgentOutputError("最终决策人没有给出 thesis")
     risks = final.get("risks") or []
     if not isinstance(risks, list):
-        risks = []
-    return {"ts_code": deep["ts_code"], "name": deep["name"], "industry": deep["industry"], "score": score, "stance": "bullish" if verdict == "看多" else ("bearish" if verdict == "看空" else "neutral"), "verdict": verdict, "thesis": _text(final.get("thesis"), "暂无核心逻辑"), "action": _text(final.get("action")), "risks": risks, "debate": {"bull": _text(debate.get("bull")), "bear": _text(debate.get("bear"))}, "deep": deep}
+        raise AgentOutputError("最终决策人的 risks 必须是数组")
+    return {"ts_code": deep["ts_code"], "name": deep["name"], "industry": deep["industry"], "score": score, "stance": "bullish" if verdict == "看多" else "bearish", "verdict": verdict, "thesis": thesis, "action": _text(final.get("action")), "risks": risks, "debate": {"bull": _text(debate.get("bull")), "bear": _text(debate.get("bear"))}, "deep": deep}
 
 
 def coarse_screen(client: OpenAICompatibleClient, config: AgentConfig, candidates: list[dict], depth: int, on_progress: Optional[ProgressFn] = None) -> list[dict]:
@@ -494,8 +502,10 @@ def debate_final(client: OpenAICompatibleClient, config: AgentConfig, snapshots:
         if callable(getattr(client, "chat_stream", None)):
             public = run_public_debate(client, config, snapshot=snapshots[code], deep=deep, emit=on_progress, publish=publish)
             final = public["final"]
-            verdict = _text(final.get("verdict"), "中性")
-            item = {"ts_code": code, "name": deep["name"], "industry": deep["industry"], "score": _score(final.get("score"), "最终决策人的 score"), "stance": "bullish" if verdict == "看多" else ("bearish" if verdict == "看空" else "neutral"), "verdict": verdict, "thesis": _text(final.get("thesis")), "action": _text(final.get("action")), "risks": final.get("risks") or [], "debate": {}, "deep": deep, "public_debate": public["public_debate"], "event_seq": public["event_seq"], "rank": index}
+            verdict = _text(final.get("verdict"))
+            if verdict not in ("看多", "看空"):
+                raise AgentOutputError(f"最终决策人的 verdict 只能是看多或看空,实际:{verdict or '(空)'}")
+            item = {"ts_code": code, "name": deep["name"], "industry": deep["industry"], "score": _score(final.get("score"), "最终决策人的 score"), "stance": "bullish" if verdict == "看多" else "bearish", "verdict": verdict, "thesis": _text(final.get("thesis")), "action": _text(final.get("action")), "risks": final.get("risks") or [], "debate": {}, "deep": deep, "public_debate": public["public_debate"], "event_seq": public["event_seq"], "rank": index}
         else:
             item = _debate_one(client, config, snapshots[code], deep)
             item["rank"] = index
@@ -505,6 +515,8 @@ def debate_final(client: OpenAICompatibleClient, config: AgentConfig, snapshots:
     for rank, item in enumerate(out, 1):
         item["rank"] = rank
     return out
+
+
 def run_single(client: OpenAICompatibleClient, config: AgentConfig, *, as_of: str, snapshot: dict, on_progress: Optional[ProgressFn] = None, publish: Optional[Callable[[dict], dict]] = None) -> dict:
     if not snapshot or not snapshot.get("stock"):
         raise AgentOutputError("单只研判快照为空,没有可研判的股票")
@@ -515,20 +527,6 @@ def run_single(client: OpenAICompatibleClient, config: AgentConfig, *, as_of: st
     final["rank"] = 1
     _progress(on_progress, "done", 1, 1, "研判完成")
     return {"as_of": as_of, "mode": "single", "candidates_limit": 1, "depth": 1, "final_count": 1, "coarse": [{"ts_code": snapshot["stock"]["ts_code"], "name": snapshot["stock"].get("name", ""), "industry": snapshot["stock"].get("industry", ""), "reason": "个股研判:直接进入深度分析"}], "deep": [deep], "final": [final]}
-
-
-def run_judge(client: OpenAICompatibleClient, config: AgentConfig, *, as_of: str, candidates: list[dict], loader: Callable[[str], dict], candidates_limit: int, depth: int, final_count: int, on_progress: Optional[ProgressFn] = None, publish: Optional[Callable[[dict], dict]] = None) -> dict:
-    candidates_limit, depth, final_count = config.clamp(candidates_limit, depth, final_count)
-    pool = candidates[:candidates_limit]
-    if not pool:
-        raise AgentOutputError("候选池为空,没有可研判的股票")
-    selected = coarse_screen(client, config, pool, depth, on_progress)
-    if not selected:
-        raise AgentOutputError("粗筛没有选出任何股票")
-    snapshots = {item["ts_code"]: loader(item["ts_code"]) for item in selected}
-    deep_results = deep_analyze(client, config, snapshots, on_progress)
-    final = debate_final(client, config, snapshots, deep_results, final_count, on_progress, publish)
-    return {"as_of": as_of, "candidates_limit": candidates_limit, "depth": depth, "final_count": final_count, "coarse": selected, "deep": deep_results, "final": final}
 
 
 def run_judge(client: OpenAICompatibleClient, config: AgentConfig, *, as_of: str, candidates: list[dict], loader: Callable[[str], dict], candidates_limit: int, depth: int, final_count: int, on_progress: Optional[ProgressFn] = None, publish: Optional[Callable[[dict], dict]] = None) -> dict:

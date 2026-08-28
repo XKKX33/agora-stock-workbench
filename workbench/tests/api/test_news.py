@@ -427,3 +427,10 @@ def test_industry_overview_route_not_shadowed_by_single_industry(client, db_path
     single = client.get("/api/news/industries/银行").json()
     assert single["available"] is True
     assert single["link_key"] == "银行"
+def test_news_collect_rejection_exposes_explicit_reason(client):
+    response = client.post("/api/news/collect", json={})
+
+    assert response.status_code == 409
+    payload = response.json()
+    assert payload["error"]["code"] == "news_disabled"
+    assert payload["error"]["message"]

@@ -2,8 +2,9 @@
 
 from typing import Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
+from app.dependencies import validated_signal_date
 from app.services.screener import ScreenerService
 
 router = APIRouter()
@@ -21,7 +22,7 @@ def screener(
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=30, ge=1, le=200),
     run_id: str | None = None,
-    as_of: str | None = None,
+    as_of: str | None = Depends(validated_signal_date),
     strategy: str | None = None,
 ) -> dict:
     return ScreenerService(request.app.state.repository.db_path).list(

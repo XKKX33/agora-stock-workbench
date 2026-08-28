@@ -52,7 +52,7 @@ def _report_database(settings: AppSettings) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="启动 Hermes 股票量化工作台")
+    parser = argparse.ArgumentParser(description="启动 AGORA 股票量化工作台")
     defaults = AppSettings()
     parser.add_argument("--host", default=defaults.host, help="监听地址")
     parser.add_argument("--port", type=int, default=defaults.port, help="监听端口")

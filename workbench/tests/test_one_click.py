@@ -171,6 +171,44 @@ def test_one_click_runs_steps_in_fixed_order(tmp_path: Path):
     }
 
 
+def test_running_step_is_reported_before_it_finishes(tmp_path: Path):
+    """进度必须在步骤**开始**时就上报，而不是等它跑完。
+
+    `agents` 这一步是 20 只股票乘多个角色的串行模型调用，实测跑了 19 分钟。
+    如果只在完成后上报，这 19 分钟里页面显示的是上一步 `collect_news`，
+    用户看到的是「卡在采集舆情」——最慢的步骤恰好是唯一看不见进度的。
+    """
+    from app.services.one_click import OneClickRunner
+
+    db_path = tmp_path / "market.duckdb"
+    with Store(db_path, ensure_schema=True):
+        pass
+
+    seen: list[str | None] = []
+
+    class WatchingOperations(FakeOperations):
+        def agents(self, context) -> dict:
+            # 进入这一步的执行体时，外界应该已经知道 agents 在跑了。
+            seen.append(current_step_at_agents_entry[0])
+            return self._done("agents", context)
+
+    current_step_at_agents_entry: list[str | None] = [None]
+
+    def on_step(payload: dict) -> None:
+        current_step_at_agents_entry[0] = payload.get("current_step")
+
+    OneClickRunner(db_path, operations=WatchingOperations(db_path)).run(
+        run_id="r-progress",
+        strategy="strong_mainup",
+        trade_date=AS_OF,
+        online=True,
+        exchange="SSE",
+        on_step=on_step,
+    )
+
+    assert seen == ["agents"], f"agents 执行期间外界看到的是 {seen}"
+
+
 def test_ai_failure_becomes_warning_and_later_steps_continue(tmp_path: Path):
     from app.services.one_click import OneClickRunner
 
@@ -194,6 +232,41 @@ def test_ai_failure_becomes_warning_and_later_steps_continue(tmp_path: Path):
     assert agent_step["status"] == "warning"
     assert agent_step["data"]["error"]["type"] == "AIRequestError"
     assert result["steps"][-1]["status"] == "ok"
+
+
+def test_warning_summary_carries_real_reason_not_success_text(tmp_path: Path):
+    """步骤成功但带告警时，汇总必须带出真实原因。
+
+    detail 是成功文案；只给 detail 会让「有告警」看起来像「一切正常」。
+    """
+    from app.services.one_click import OneClickRunner
+
+    db_path = tmp_path / "market.duckdb"
+    with Store(db_path, ensure_schema=True):
+        pass
+
+    class WarnOperations(FakeOperations):
+        def integrity(self, context) -> dict:
+            payload = self._done("integrity", context)
+            payload["_status"] = "warning"
+            payload["_detail"] = "完整性检查通过：候选 259，上下文 259"
+            payload["warnings"] = ["完整股票上下文少于 Agent 默认最终数量，将按实际数量缩小"]
+            return payload
+
+    result = OneClickRunner(db_path, operations=WarnOperations(db_path)).run(
+        run_id="r-warn",
+        strategy="strong_mainup",
+        trade_date=AS_OF,
+        online=True,
+        exchange="SSE",
+    )
+
+    assert result["has_warnings"] is True
+    entry = next(item for item in result["warnings"] if item["step"] == "integrity")
+    assert entry["reasons"] == [
+        "完整股票上下文少于 Agent 默认最终数量，将按实际数量缩小"
+    ]
+    assert entry["error"] is None
 
 
 def test_failed_experiment_never_persists_bearer_secret(tmp_path: Path):
@@ -376,6 +449,186 @@ def test_one_click_agents_skips_bad_candidate_and_persists_valid_report(
     assert [event["event_type"] for event in events] == ["run.started", "stage.completed", "run.completed"]
     assert list(judgments["run_id"]) == ["pipeline-task-id"]
     assert context.agent_result["final"][0]["ts_code"] == "000001.SZ"
+
+
+def test_agent_event_stream_refreshes_both_heartbeats(tmp_path: Path, monkeypatch):
+    """研判跑三十多分钟，期间必须刷 agent_runs 和 task_runs 的心跳。
+
+    原先 agent_runs 只在开始和收尾写心跳，task_runs 根本没人写。启动回收按心跳
+    判活，于是一个正常运行的流程和"进程已死"在库里长得一模一样——实测心跳空档
+    2083 秒，远超 15 分钟的回收窗口，重启就会把它误杀。
+    """
+    import app.services.one_click as one_click
+    from app.schemas.pi_agent import PiJudgmentResult
+    from app.services.one_click import OneClickContext
+    from engine.agents import AgentConfig
+    from engine.ai import AIConfig
+
+    db_path = tmp_path / "agent-heartbeat.duckdb"
+    with Store(db_path, ensure_schema=True) as store:
+        # 一键流程的 task_runs 行由 PipelineManager 建，这里直接造一条等价的。
+        store.con.execute(
+            """
+            INSERT INTO task_runs (task_id, kind, trade_date, strategy, status,
+                                   created_at, started_at, heartbeat_at)
+            VALUES ('hb-task', 'one_click_pipeline', ?, 'strong_mainup', 'running',
+                    '2026-08-21T00:00:00+00:00', '2026-08-21T00:00:00+00:00',
+                    '2026-08-21T00:00:00+00:00')
+            """,
+            [AS_OF],
+        )
+
+    class FakeRepository:
+        def history(self, _ts_code, _as_of, _limit):
+            return pd.DataFrame([{"close": 10.0, "pct_chg": 1.0}])
+
+    class FakeLoader:
+        def __init__(self, _path):
+            self.repository = FakeRepository()
+
+        def _compact_row(self, row, _history):
+            return {"ts_code": row["ts_code"], "name": row["name"], "industry": row["industry"]}
+
+        def _load_snapshot(self, code, _as_of):
+            return {"stock": {"ts_code": code, "name": "示例", "industry": "测试"}}
+
+    # 节流是按 time.monotonic 走的：让它每次调用都前进一分钟，等价于事件之间
+    # 隔了很久，这样三个事件都该刷心跳。
+    ticks = iter(range(0, 100000, 60))
+    monkeypatch.setattr(one_click.time, "monotonic", lambda: next(ticks))
+
+    class FakePiClient:
+        def start_judgment(self, _request, *, run_id=None):
+            return run_id
+
+        def stream_events(self, _run_id, after_seq=0):
+            yield {"source_seq": 1, "event_type": "message.failed", "data": {"error": "methodology stream aborted upstream"}}
+            yield {"source_seq": 2, "event_type": "message.failed", "data": {"error": "bull stream aborted upstream"}}
+            yield {"source_seq": 3, "event_type": "message.completed", "role": "bull", "stage": "debate", "data": {"summary": "多方依据"}}
+
+        def get_result(self, run_id, request):
+            return PiJudgmentResult.model_validate({
+                "protocol_version": "1", "workflow_version": "1", "run_id": run_id,
+                "trade_date": request.trade_date, "candidate_hash": request.candidate_hash,
+                "input_hash": request.input_hash,
+                "coarse": [{"ts_code": "000001.SZ", "rank": 1, "score": 80, "reason": "资金确认"}],
+                "deep": [{"ts_code": "000001.SZ", "rank": 1, "score": 80, "analysts": {
+                    "methodology": {"stance": "bull", "conclusion": "方法通过", "risks": []},
+                    "sentiment": {"stance": "neutral", "conclusion": "舆情中性", "risks": []},
+                    "trend": {"stance": "bull", "conclusion": "趋势向上", "risks": []},
+                }}],
+                "final": [{"ts_code": "000001.SZ", "rank": 1, "decision": "buy", "score": 80,
+                           "bull_case": "多方依据", "bear_case": "空方风险", "rebuttal": "反驳", "risk_control": "止损"}],
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            })
+
+    monkeypatch.setattr(one_click, "_AgentDataLoader", FakeLoader)
+    context = OneClickContext(
+        run_id="hb-task", db_path=db_path, strategy="strong_mainup", trade_date=AS_OF,
+        online=False, exchange="SSE", as_of=AS_OF,
+        agent_config=AgentConfig(default_candidates=1, default_depth=1, default_final=1,
+                                 provider="openai-compatible", model=None, reasoning_effort="low"),
+        ai_config=AIConfig(enabled=True, provider="openai-compatible", model="minimax-m3",
+                           base_url="https://example.test/v1"),
+        pi_client=FakePiClient(),
+        scan_rows=pd.DataFrame([
+            {"ts_code": "000001.SZ", "name": "示例", "industry": "测试", "total": 88.0},
+        ]),
+    )
+
+    one_click.DefaultOneClickOperations().agents(context)
+
+    with Store(db_path, ensure_schema=False) as store:
+        agent_hb = store.get_agent_run("hb-task")["heartbeat_at"]
+        task_hb = store.con.execute(
+            "SELECT heartbeat_at FROM task_runs WHERE task_id = 'hb-task'"
+        ).fetchone()[0]
+
+    assert str(agent_hb) > "2026-08-21T00:00:00+00:00", "agent_runs 心跳没被事件刷新"
+    assert str(task_hb) > "2026-08-21T00:00:00+00:00", "task_runs 心跳没被事件刷新"
+
+def test_agents_detail_reports_actual_depth_not_requested(tmp_path: Path, monkeypatch):
+    """Pi 少交一只深度分析时，detail 必须报实际值。
+
+    报告文字说「深度 2」而 data.depth=1 会让人以为两只都分析过了。
+    """
+    import app.services.one_click as one_click
+    from app.schemas.pi_agent import PiJudgmentResult
+    from app.services.one_click import OneClickContext
+    from engine.agents import AgentConfig
+    from engine.ai import AIConfig
+
+    db_path = tmp_path / "agent-depth-drift.duckdb"
+    with Store(db_path, ensure_schema=True):
+        pass
+
+    class FakeLoader:
+        class repository:  # noqa: N801 - 仅测试替身
+            @staticmethod
+            def history(_ts_code, _as_of, _limit):
+                return pd.DataFrame([{"close": 10.0, "pct_chg": 1.0}])
+
+        def __init__(self, _path):
+            pass
+
+        def _compact_row(self, row, _history):
+            return {"ts_code": row["ts_code"], "name": row["name"], "industry": row["industry"]}
+
+        def _load_snapshot(self, code, _as_of):
+            return {"stock": {"ts_code": code, "name": "示例", "industry": "测试"}}
+
+    class ShortDeepPiClient:
+        """两只候选都送审，但只回一只 deep —— 真实的深度缺交。"""
+
+        def start_judgment(self, request, *, run_id=None):
+            self.request = request
+            return run_id
+
+        def stream_events(self, _run_id, after_seq=0):
+            return iter(())
+
+        def get_result(self, run_id, request):
+            return PiJudgmentResult.model_validate({
+                "protocol_version": "1", "workflow_version": "1", "run_id": run_id,
+                "trade_date": request.trade_date, "candidate_hash": request.candidate_hash,
+                "input_hash": request.input_hash,
+                "coarse": [
+                    {"ts_code": "000001.SZ", "rank": 1, "score": 80, "reason": "资金确认"},
+                    {"ts_code": "000002.SZ", "rank": 2, "score": 70, "reason": "趋势尚可"},
+                ],
+                "deep": [{"ts_code": "000001.SZ", "rank": 1, "score": 80, "analysts": {
+                    "methodology": {"stance": "bull", "conclusion": "方法通过", "risks": []},
+                    "sentiment": {"stance": "neutral", "conclusion": "舆情中性", "risks": []},
+                    "trend": {"stance": "bull", "conclusion": "趋势向上", "risks": []},
+                }}],
+                "final": [{"ts_code": "000001.SZ", "rank": 1, "decision": "buy", "score": 80,
+                           "bull_case": "多方依据", "bear_case": "空方风险",
+                           "rebuttal": "反驳", "risk_control": "止损"}],
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            })
+
+    monkeypatch.setattr(one_click, "_AgentDataLoader", FakeLoader)
+    context = OneClickContext(
+        run_id="pipeline-task-id", db_path=db_path, strategy="strong_mainup", trade_date=AS_OF,
+        online=False, exchange="SSE", as_of=AS_OF,
+        agent_config=AgentConfig(default_candidates=2, default_depth=2, default_final=1,
+                                 provider="openai-compatible", model=None, reasoning_effort="low"),
+        ai_config=AIConfig(enabled=True, provider="openai-compatible", model="minimax-m3",
+                           base_url="https://example.test/v1"),
+        pi_client=ShortDeepPiClient(),
+        scan_rows=pd.DataFrame([
+            {"ts_code": "000001.SZ", "name": "示例", "industry": "测试", "total": 88.0},
+            {"ts_code": "000002.SZ", "name": "另一只", "industry": "测试", "total": 80.0},
+        ]),
+    )
+
+    result = one_click.DefaultOneClickOperations().agents(context)
+
+    assert result["depth"] == 1
+    assert "深度 1" in result["_detail"]
+    assert "深度 2" not in result["_detail"]
+    assert any("实际完成深度 1/2" in warning for warning in result["warnings"])
+
 
 def test_preflight_failure_warns_and_skips_dependent_steps_without_raising(
     tmp_path: Path,
@@ -780,6 +1033,77 @@ def test_strict_integrity_warns_for_equal_counts_with_different_stock_codes(
     result = validate_scan_integrity(prepared, require_complete_sources=True)
 
     assert any("daily 全市场覆盖率" in warning for warning in result["warnings"])
+
+
+def _integrity_context(tmp_path: Path, prepared, *, default_final: int = 3):
+    """给真实 integrity 步骤最小可用的上下文。"""
+    import app.services.one_click as one_click
+    from engine.agents import AgentConfig
+
+    context = one_click.OneClickContext(
+        run_id="integrity-detail",
+        db_path=tmp_path / "market.duckdb",
+        strategy="strong_mainup",
+        trade_date=None,
+        online=False,
+        exchange="SSE",
+        settings=copy.deepcopy(load_settings()),
+    )
+    context.prepared = prepared
+    context.agent_config = AgentConfig(default_final=default_final)
+    return context
+
+
+def test_integrity_detail_never_claims_pass_while_status_is_warning(tmp_path: Path):
+    """真实 integrity 有告警时，文案不许写"通过"。
+
+    状态与文案分开拼会让同一份报告自相矛盾：状态条黄了，明细却说没事，
+    看报告的人只会相信文案。
+    """
+    import app.services.one_click as one_click
+
+    prepared = _strict_preparation(tmp_path, missing_limit=True)
+    context = _integrity_context(tmp_path, prepared)
+
+    payload = one_click.DefaultOneClickOperations().integrity(context)
+
+    assert payload["_status"] == "warning"
+    assert payload["warnings"], "夹具没造出告警，测试失去意义"
+    assert "通过" not in payload["_detail"]
+    assert "完整性检查有告警" in payload["_detail"]
+    # 原因必须落在明细里，否则页面上只看到"有告警"却不知道告警什么。
+    for reason in payload["warnings"]:
+        assert reason in payload["_detail"]
+
+
+def test_integrity_detail_says_pass_only_when_there_is_no_warning(tmp_path: Path):
+    import app.services.one_click as one_click
+
+    prepared = _strict_preparation(tmp_path)
+    context = _integrity_context(tmp_path, prepared, default_final=1)
+
+    payload = one_click.DefaultOneClickOperations().integrity(context)
+
+    assert payload["warnings"] == []
+    assert payload["_status"] == "ok"
+    assert payload["_detail"].startswith("完整性检查通过：")
+
+
+def test_integrity_warns_when_context_count_is_below_agent_final(tmp_path: Path):
+    """上下文不够 Agent 最终数量时必须告警并写清会缩小。"""
+    import app.services.one_click as one_click
+
+    prepared = _strict_preparation(tmp_path)
+    context = _integrity_context(
+        tmp_path, prepared, default_final=len(prepared.contexts) + 1
+    )
+
+    payload = one_click.DefaultOneClickOperations().integrity(context)
+
+    assert payload["_status"] == "warning"
+    assert any("按实际数量缩小" in reason for reason in payload["warnings"])
+    assert "通过" not in payload["_detail"]
+
 
 
 def test_strict_integrity_accepts_source_aligned_absent_stock(

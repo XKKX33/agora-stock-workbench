@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hermes 股票量化工作台</title>
+  <title>AGORA 股票量化工作台</title>
   <link rel="stylesheet" href="/assets/css/theme.css">
   <link rel="icon" href="data:,">
 </head>
@@ -14,31 +14,56 @@
       <div id="error-banner" class="error-banner" role="alert"></div>
       <header class="page-header">
         <div>
-          <div class="eyebrow">Decision surface</div>
+          <div class="eyebrow">Decision surface · Control room</div>
           <h1>市场总览</h1>
-          <p>只显示最新数据状态、扫描漏斗和最终入选结果。行情通过 Tushare 更新，页面统一读取 DuckDB。</p>
+          <p>在线更新、方法论选股、板块舆情和 Agent 辩论集中在一块黑板上。</p>
         </div>
         <div class="header-meta"><div id="updated-at">等待数据</div><div>交易日 <span id="trade-date">—</span></div></div>
       </header>
 
-      <section class="grid grid-4">
+      <section class="panel overview-controls" aria-label="总览操作台">
+        <div class="panel-header"><div><h2>工作台操作</h2><p>单步任务独立运行；一键全流程默认在线更新。</p></div><span id="overview-status" class="status-tag muted">空闲</span></div>
+        <div class="button-row overview-actions">
+          <button id="overview-scan" class="button" type="button">在线选股</button>
+          <button id="overview-news" class="button" type="button">采集舆情</button>
+          <button id="overview-agents" class="button" type="button">Agent 辩论</button>
+          <button id="overview-refresh" class="button" type="button">刷新状态</button>
+          <button id="overview-pipeline" class="button primary" type="button">一键在线全流程</button>
+        </div>
+      </section>
+
+      <section class="overview-blackboard panel" id="overview-blackboard" aria-label="实时运行黑板">
+        <div class="panel-header"><div><h2>实时运行黑板</h2><p id="blackboard-meta">还没有任务上黑板</p></div><span id="blackboard-state" class="status-tag muted">待命</span></div>
+        <div class="overview-progress" id="overview-progress"><div id="overview-progress-bar"></div></div>
+        <div class="overview-progress-meta"><span id="overview-progress-message">点击上方按钮开始工作</span><strong id="overview-progress-percent">0%</strong></div>
+        <div id="overview-blackboard-logs" class="overview-log-list"><div class="empty-state">暂无日志。黑板正在等第一条消息。</div></div>
+      </section>
+
+      <section class="grid grid-4 overview-metrics">
         <article class="panel metric"><span class="metric-label">候选召回</span><strong id="metric-candidates" class="metric-value">—</strong><span class="metric-note">进入因子计算的股票</span></article>
         <article class="panel metric"><span class="metric-label">完成打分</span><strong id="metric-scored" class="metric-value">—</strong><span class="metric-note">具备完整上下文</span></article>
         <article class="panel metric"><span class="metric-label">通过门槛</span><strong id="metric-passed" class="metric-value">—</strong><span class="metric-note">满足策略硬条件</span></article>
         <article class="panel metric"><span class="metric-label">最终入选</span><strong id="metric-final" class="metric-value accent">—</strong><span id="scan-state" class="metric-note">—</span></article>
       </section>
 
+      <section class="overview-agent-board panel" id="overview-agent-panels" aria-label="Agent 分析黑板">
+        <div class="panel-header"><div><h2>Agent 辩论分区</h2><p>主黑板汇报进程；展开下方分区查看各角色证据。</p></div><span id="overview-agent-meta" class="muted">等待 Agent 任务</span></div>
+        <div class="agent-mini-grid">
+          <details class="agent-mini" data-role="methodology"><summary>方法论</summary><div data-role-content>尚未收到发言</div></details>
+          <details class="agent-mini" data-role="sentiment"><summary>舆情</summary><div data-role-content>尚未收到发言</div></details>
+          <details class="agent-mini" data-role="trend"><summary>走势</summary><div data-role-content>尚未收到发言</div></details>
+          <details class="agent-mini" data-role="funds"><summary>资金</summary><div data-role-content>等待资金数据</div></details>
+          <details class="agent-mini" data-role="risk_chair"><summary>风控</summary><div data-role-content>尚未收到发言</div></details>
+          <details class="agent-mini" data-role="debate" data-roles="bull,bear,bull_counter"><summary>多空辩论</summary><div data-role-content>尚未收到发言</div></details>
+        </div>
+      </section>
+
       <section class="grid grid-3" style="margin-top:16px">
         <article class="panel span-2">
-          <div class="panel-header"><div><h2>最新入选</h2><p>点击股票进入选股台查看完整归因</p></div><button id="refresh" class="button">刷新</button></div>
-          <div class="table-wrap">
-            <table><thead><tr><th>排名</th><th>股票</th><th>行业</th><th>综合分</th><th>资金确认</th><th>归因</th></tr></thead><tbody id="pick-rows"></tbody></table>
-          </div>
+          <div class="panel-header"><div><h2>最新入选</h2><p>点击股票进入选股台查看完整归因</p></div><span id="picks-signal" class="signal-chip">加载中…</span></div>
+          <div class="table-wrap"><table><thead><tr><th>排名</th><th>股票</th><th>行业</th><th>综合分</th><th>资金确认</th><th>归因</th></tr></thead><tbody id="pick-rows"></tbody></table></div>
         </article>
-        <article class="panel raised">
-          <div class="panel-header"><div><h2>数据仓库</h2><p>核心表行数与最新日期</p></div></div>
-          <div id="table-status" class="stack"></div>
-        </article>
+        <article class="panel raised"><div class="panel-header"><div><h2>数据仓库</h2><p>核心表行数与最新日期</p></div></div><div id="table-status" class="stack"></div></article>
       </section>
     </main>
   </div>

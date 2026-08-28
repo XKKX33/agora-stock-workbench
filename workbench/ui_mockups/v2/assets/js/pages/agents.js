@@ -113,8 +113,8 @@ function renderJudgeResults(job) {
         ${(item.risks || []).length ? `<ul class="agent-risks">${item.risks.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
         <div class="agent-source">数据来源：选股台扫描 / 日线·周线指标 / TrendRadar 舆情 / 资金流</div>
         <div class="agent-card-foot">
-          <button type="button" class="button primary" data-act="agent-watch" style="min-height:30px;padding:0 12px;font-size:12px">☆ 加入自选</button>
-          <a class="button" href="p6_chart.html?code=${encodeURIComponent(item.ts_code)}" style="min-height:30px;padding:6px 12px;font-size:12px">看K线</a>
+          <button type="button" class="button primary" data-act="agent-watch">☆ 加入自选</button>
+          <a class="button" href="p6_chart.html?code=${encodeURIComponent(item.ts_code)}">看K线</a>
         </div>
         <details class="agent-detail">
           <summary>分析师详情与多空辩论</summary>
@@ -145,6 +145,9 @@ function renderJudgeResults(job) {
   });
 }
 
+// 后端阶段名是英文标识,直接显示给用户看不懂,在展示层译一次。
+const STAGE_TEXT = { queued: "排队中", run: "启动中", analysis: "分析师研判", debate: "公开辩论", done: "完成", failed: "失败" };
+
 function renderProgress(stage, step, total, msg) {
   if (!progress) return;
   progress.hidden = false;
@@ -152,7 +155,7 @@ function renderProgress(stage, step, total, msg) {
     stageHost.innerHTML = "完成";
     bar.style.width = "100%";
   } else {
-    stageHost.innerHTML = stage || "运行中";
+    stageHost.innerHTML = STAGE_TEXT[stage] || stage || "运行中";
     stepHost.textContent = total ? `${step} / ${total}` : "";
     bar.style.width = total ? `${Math.round((step / total) * 100)}%` : "30%";
   }
@@ -203,11 +206,14 @@ async function startSingle() {
 }
 
 async function startFlow() {
+  const context = workContextParams();
   const body = {
-    ...workContextParams(),
     candidates: Number(document.querySelector("#agent-candidates").value) || agentDefaults.candidates,
     depth: Number(document.querySelector("#agent-depth").value) || agentDefaults.depth,
     final: Number(document.querySelector("#agent-final").value) || agentDefaults.final,
+    ts_codes: Array.isArray(context.candidate_codes) && context.candidate_codes.length ? context.candidate_codes : undefined,
+    run_id: context.run_id,
+    as_of: context.as_of,
     force: document.querySelector("#agent-force-flow").checked,
   };
   resultsHost.innerHTML = "";
@@ -280,6 +286,34 @@ function renderStockOptions(items) {
   box.innerHTML = items.map((item) => `<option value="${esc(item.ts_code)}">${esc(item.name || "")} · ${esc(item.industry || "")}</option>`).join("");
 }
 
+/** 刷新页面后接上仍在跑的研判。
+ *
+ * 研判是十几分钟的后台任务,进度只在点按钮那一刻挂上轮询。页面一刷新轮询就断了,
+ * 界面永远停在"排队中"、结果区空白,看着像没跑——实际后台一直在跑。
+ * 列表里混着九步流程任务,只认 agent_judge,否则会把流程任务当研判渲染。
+ */
+async function resumeRunning() {
+  try {
+    const data = await request("/api/agents/jobs?limit=10");
+    const judges = (data.items || []).filter((it) => it.kind === "agent_judge");
+    const live = judges.find((it) => it.status === "running" || it.status === "queued");
+    if (live) {
+      const id = live.task_id || live.job_id;
+      if (!id) return;
+      renderProgress(live.status === "queued" ? "queued" : "running", 0, 0, "已接上正在运行的研判");
+      pollJob(id);
+      return;
+    }
+    // 没有在跑的就把最近一次成功结果显示出来,避免结果区长期空白。
+    const done = judges.find((it) => it.status === "succeeded");
+    if (done) {
+      const id = done.task_id || done.job_id;
+      if (!id) return;
+      renderJudgeResults(await request(`/api/agents/jobs/${encodeURIComponent(id)}`));
+    }
+  } catch (error) { showError(error); }
+}
+
 document.querySelector("#mode-single")?.addEventListener("click", () => switchMode("single"));
 document.querySelector("#mode-flow")?.addEventListener("click", () => switchMode("flow"));
 document.querySelector("#agent-single-run")?.addEventListener("click", startSingle);
@@ -287,4 +321,4 @@ document.querySelector("#agent-flow-run")?.addEventListener("click", startFlow);
 document.querySelector("#agent-ts-code")?.addEventListener("keydown", (e) => { if (e.key === "Enter") startSingle(); });
 [document.querySelector("#agent-candidates"), document.querySelector("#agent-depth"), document.querySelector("#agent-final")].forEach((el) => el?.addEventListener("change", clampParams));
 
-loadStatus().then(loadRecent).catch(showError);
+loadStatus().then(loadRecent).then(resumeRunning).catch(showError);

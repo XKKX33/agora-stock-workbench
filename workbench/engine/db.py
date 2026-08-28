@@ -968,7 +968,14 @@ class Store(AgentEventMixin, ExperimentMixin, NewsAgentMixin):
         ).df()
 
     def all_picks(self, strategy: Optional[str] = None) -> pd.DataFrame:
-        """读取全部选股台账(供 IC / 胜率 / 分层统计)。"""
+        """读取全部选股名单(供 IC / 胜率 / 分层统计 / 回测 / ML 训练)。
+
+        返回的是**每个信号日的最新一份**名单，不是历史全部批次：`picks` 主键
+        (as_of, strategy, ts_code) 不含 run_id，同一信号日重跑会整组替换。
+        这正是回测与 ML 需要的口径——同一天留多份会让同一笔钱被重复计入，净值成倍虚高。
+
+        要按批次追溯「某一次运行选了什么」，读 `experiment_decisions`（主键含 run_id）。
+        """
         if strategy:
             return self.con.execute(
                 "SELECT * FROM picks WHERE strategy = ? ORDER BY run_date, rank",

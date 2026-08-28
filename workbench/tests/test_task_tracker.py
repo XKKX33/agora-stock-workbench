@@ -126,3 +126,60 @@ def test_stale_task_takeover_closes_running_experiment(tmp_path):
         assert experiment is not None
         assert experiment["status"] == "failed"
         assert "StaleTask" in experiment["error_json"]
+def test_progress_event_persists_current_stage_steps_and_logs(tmp_path):
+    db_path = tmp_path / "progress.duckdb"
+    with Store(db_path):
+        pass
+    tracker = TaskTracker(db_path)
+    claim = tracker.claim(kind="scan", trade_date="20260817", strategy="strong_mainup")
+    tracker.mark_running(claim.task_id)
+    tracker.update_progress(
+        claim.task_id,
+        stage="candidate_pool",
+        step=4,
+        total=7,
+        message="初步候选 259 只",
+        detail="候选池构建完成",
+    )
+
+    task = tracker.get(claim.task_id)
+
+    assert task["result"]["progress"]["stage"] == "candidate_pool"
+    assert task["result"]["progress"]["percent"] == 57
+    assert task["result"]["steps"][0]["status"] == "running"
+    assert task["result"]["progress"]["logs"][0]["message"] == "初步候选 259 只"
+def test_terminal_result_keeps_progress_history(tmp_path):
+    db_path = tmp_path / "terminal-progress.duckdb"
+    with Store(db_path):
+        pass
+    tracker = TaskTracker(db_path)
+    claim = tracker.claim(kind="news_collect", trade_date="20260817", strategy="")
+    tracker.mark_running(claim.task_id)
+    tracker.update_progress(
+        claim.task_id,
+        stage="fetch_sources",
+        step=4,
+        total=7,
+        message="已抓取 12 条原始新闻",
+    )
+    tracker.finish(claim.task_id, status="succeeded", result={"stored": 8})
+
+    task = tracker.get(claim.task_id)
+
+    assert task["result"]["stored"] == 8
+    assert task["result"]["progress"]["logs"][0]["message"] == "已抓取 12 条原始新闻"
+    assert task["result"]["steps"][0]["name"] == "fetch_sources"
+def test_failed_terminal_task_keeps_failed_progress_step(tmp_path):
+    db_path = tmp_path / "failed-progress.duckdb"
+    with Store(db_path):
+        pass
+    tracker = TaskTracker(db_path)
+    claim = tracker.claim(kind="scan", trade_date="20260817", strategy="strong_mainup")
+    tracker.mark_running(claim.task_id)
+    tracker.update_progress(claim.task_id, stage="score", step=5, total=5, message="评分失败前最后阶段")
+    tracker.finish(claim.task_id, status="failed", error={"message": "评分失败"})
+
+    task = tracker.get(claim.task_id)
+
+    assert task["status"] == "failed"
+    assert task["result"]["steps"][0]["status"] == "failed"

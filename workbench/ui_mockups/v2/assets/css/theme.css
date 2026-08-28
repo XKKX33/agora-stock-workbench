@@ -1,4 +1,4 @@
-/* Hermes 股票研究工作台：同一结构支持明亮与暗夜主题。 */
+/* AGORA 股票研究工作台：同一结构支持明亮与暗夜主题。 */
 :root,
 [data-theme="light"] {
   color-scheme: light;
@@ -47,9 +47,9 @@
 }
 
 :root {
-  --font-display: "Times New Roman", "SimSun", "宋体", serif;
-  --font-body: "Times New Roman", "SimSun", "宋体", serif;
-  --font-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  --font-display: "SimSun", "宋体", serif;
+  --font-body: "SimSun", "宋体", serif;
+  --font-mono: "SimSun", "宋体", serif;
   --sidebar: 232px;
   --radius-lg: 8px;
   --radius: 8px;
@@ -951,9 +951,71 @@ html[data-theme] .scan-node::after { background: var(--accent); box-shadow: none
 .return-down { color: #188038 !important; }
 [data-theme="dark"] .return-up { color: #f28b82 !important; }
 [data-theme="dark"] .return-down { color: #81c995 !important; }
-.date-divider td { padding: 14px 12px 6px; background: var(--bg); border-bottom-color: var(--line); }
-.date-divider span { color: var(--text); font-weight: 650; }
-.date-divider small { margin-left: 8px; color: var(--text-muted); }
+/* 批次分隔线：同一信号日可以跑多次，这条线是分批的唯一视觉边界，必须一眼看见。
+
+   两次改都没生效，原因记下来：`html[data-theme] th, html[data-theme] td` 的
+   `border-color: var(--line-soft)` 优先级比 `.date-divider td` 高（html + 属性 + 元素），
+   把 border-top 的颜色静默覆盖成灰色——写了 2px 蓝线，渲染出来是 2px 灰线。
+   所以这里必须用同等或更高优先级的选择器，并显式写 border-top-color。
+   同时分隔线原先行高 48.5px 比数据行 59.5px 还矮、背景和数据行几乎同色，
+   视觉分量反而更轻。整块做成深色标题条才分得开。 */
+html[data-theme] .date-divider td {
+  padding: 14px 14px;
+  background: var(--accent);
+  border-top: none;
+  border-bottom: 1px solid var(--accent);
+}
+html[data-theme] .date-divider span {
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: .2px;
+}
+html[data-theme] .date-divider small {
+  margin-left: 12px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, .18);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+/* 暗色主题的 --accent 是浅蓝 #8ab4f8，白字压在上面对比不足（实测发虚）。
+   浅蓝底配深色字才够，胶囊也换成深色半透明。 */
+html[data-theme="dark"] .date-divider span { color: #0b1220; }
+html[data-theme="dark"] .date-divider small {
+  background: rgba(0, 0, 0, .22);
+  color: #0b1220;
+}
+/* 每行的批次运行时刻：区分批次的依据。`.muted` 会把它染成浅灰，所以颜色要在这里覆盖，
+   并给一个浅蓝底把它和上一行的信号日拉开——同一天 6 个批次时这行是唯一的区分点。 */
+html[data-theme] .run-stamp {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(11, 87, 208, .1);
+  color: var(--accent) !important;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 1;
+}
+/* 暗色下写死的亮色底 rgba(11,87,208,.1) 几乎看不见，换成浅色半透明。 */
+html[data-theme="dark"] .run-stamp { background: rgba(138, 180, 248, .16); }
+/* 数据来源说明：台账是累积（每次运行都留），回测读的 picks 是覆盖（每天只留最新一次）。
+   两种语义不写在页面上，用户会以为两页条数应该一致。 */
+.source-note {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-raised);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.source-note code { color: var(--accent); font-family: var(--font-mono); }
+.source-note strong { color: var(--text); }
 .reason-cell { min-width: 150px; max-width: 260px; white-space: normal; }
 
 /* Agent 页面沿用统一中性表面，覆盖旧版蓝紫玻璃效果。 */
@@ -999,12 +1061,16 @@ html[data-theme] .agent-action { color: var(--accent); }
   .section-heading { align-items: start; }
 }
 .dashboard-grid { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.dashboard-status-panel, .dashboard-timeline-panel, .dashboard-returns-panel { grid-column: 1 / -1; }
+.dashboard-status-panel, .dashboard-timeline-panel, .dashboard-returns-panel, .dashboard-final-panel { grid-column: 1 / -1; }
 .dashboard-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .dashboard-stat { display: grid; gap: 5px; min-height: 76px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface-raised); }
 .dashboard-stat span, .return-meta, .event-meta, .dashboard-select-label { color: var(--text-muted); font-size: 11px; }
 .dashboard-stat strong { font: 600 16px var(--font-mono); overflow-wrap: anywhere; }
 .dashboard-select-label { align-self: center; }
+/* 辩论矩阵的股票选择器：20 只候选共用七个角色名，必须让用户指定看哪一只，
+   否则不同股票的发言会互相覆盖，六格拼出一场不存在的辩论。 */
+.matrix-picker { display: flex; align-items: center; gap: 8px; }
+.matrix-picker .field { min-width: 132px; }
 .event-timeline { display: grid; gap: 10px; max-height: 520px; overflow: auto; padding-right: 4px; }
 .event-item { padding: 12px 14px; border: 1px solid var(--line-soft); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); background: var(--surface-raised); }
 .event-item.event-pending { border-left-color: var(--warning); }
@@ -1019,6 +1085,14 @@ html[data-theme] .agent-action { color: var(--accent); }
 .debate-cell p { margin: 9px 0 0; line-height: 1.6; color: var(--text-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .risk-verdict { border-left: 3px solid var(--warning); line-height: 1.7; }
 .risk-verdict strong { display: block; margin-bottom: 8px; }
+.final-debate { display: grid; gap: 12px; }
+.final-card { padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface-raised); }
+.final-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.final-thesis { margin: 10px 0 0; line-height: 1.7; }
+.final-row { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line-soft); }
+.final-row > span { color: var(--text-muted); font-size: 12px; }
+.final-row p { margin: 0; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.final-row.missing p { color: var(--warning); }
 .return-cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
 .return-card { min-height: 126px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface-raised); }
 .return-card.available { border-top: 3px solid var(--positive); }
@@ -1033,7 +1107,7 @@ html[data-theme] .agent-action { color: var(--accent); }
 }
 @media (max-width: 760px) {
   .dashboard-grid, .debate-matrix { grid-template-columns: 1fr; }
-  .dashboard-status-panel, .dashboard-timeline-panel, .dashboard-returns-panel { grid-column: auto; }
+  .dashboard-status-panel, .dashboard-timeline-panel, .dashboard-returns-panel, .dashboard-final-panel { grid-column: auto; }
   .dashboard-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .return-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .page-header .button-row { align-items: stretch; }
@@ -1088,3 +1162,138 @@ html[data-theme] .agent-action { color: var(--accent); }
 .work-context-label { text-transform: uppercase; letter-spacing: .08em; color: var(--text-faint); }
 .work-context-value { color: var(--text); overflow-wrap: anywhere; }
 .work-context-state { color: var(--text-muted); overflow-wrap: anywhere; }
+/* 侧栏批次选择器：从只读文字升级成可选下拉，选一次全站跟着切。 */
+.work-context-select {
+  width: 100%;
+  margin: 4px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.work-context-select:hover { border-color: var(--accent); }
+/* 入选日期徽标：总览与选股台标明「这批名单是哪一天/哪一次」，用户反馈过看不出来。 */
+.signal-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 6px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  background: rgba(11, 87, 208, .1);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+html[data-theme="dark"] .signal-chip { background: rgba(138, 180, 248, .16); }
+.task-panel { margin-top: 16px; padding: 16px; border: 1px solid rgba(62, 198, 255, .20); border-radius: var(--radius); background: linear-gradient(135deg, rgba(62, 198, 255, .045), rgba(139, 92, 246, .08)); }
+.task-panel-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.task-panel-head h2 { margin: 0; }
+.task-panel-head p { margin: 4px 0 0; color: var(--text-muted); font: 11px var(--font-mono); }
+.task-progress-row { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+.task-progress-track { height: 8px; flex: 1; overflow: hidden; border-radius: var(--radius-pill); background: var(--navy); }
+.task-progress-track > div { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, #3ec6ff, #8b5cf6); transition: width .25s var(--ease); }
+.task-message { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; }
+.task-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; padding: 0; margin: 14px 0 0; list-style: none; }
+.task-step { display: grid; gap: 3px; padding: 9px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: rgba(255,255,255,.025); }
+.task-step span { color: var(--text-muted); font-size: 10px; }
+.task-step strong { font-size: 12px; }
+.task-step small { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.task-step.running { border-color: rgba(62,198,255,.45); }
+.task-step.succeeded { border-color: rgba(61,166,120,.35); }
+.task-step.failed { border-color: rgba(224,90,90,.45); }
+.task-log { margin-top: 14px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.task-log-title { color: var(--text-muted); font-size: 11px; margin-bottom: 6px; }
+.task-log-list { display: grid; gap: 4px; max-height: 160px; overflow: auto; }
+.task-log-line { display: grid; grid-template-columns: 70px 1fr; gap: 8px; color: var(--text-muted); font: 11px/1.5 var(--font-mono); }
+.task-log-line time { color: var(--accent); }
+.task-summary { margin-top: 12px; color: var(--text); font-size: 12px; }
+/* 全局控件校准：中英文按可用字体渲染，文字和图标在固定盒内真实居中。 */
+button, input, select { font-family: var(--font-body); }
+button, .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  vertical-align: middle;
+  box-sizing: border-box;
+  line-height: 1;
+}
+.button {
+  height: 44px;
+  min-height: 44px;
+  padding: 0 14px;
+}
+.overview-controls { margin-bottom: 16px; }
+.overview-actions { justify-content: flex-start; }
+.overview-blackboard { background: var(--surface-raised); }
+.overview-progress { height: 12px; overflow: hidden; border-radius: var(--radius-pill); background: var(--line-soft); }
+.overview-progress > div { width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .3s var(--ease); }
+.overview-progress-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--text-muted); font-size: 12px; }
+.overview-progress-meta strong { color: var(--accent); font-family: var(--font-mono); }
+.overview-log-list { display: grid; gap: 5px; max-height: 260px; overflow: auto; margin-top: 14px; padding: 10px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface); }
+.overview-log-list .task-log-line { grid-template-columns: 76px 1fr; }
+.overview-agent-board { margin-top: 16px; }
+.agent-mini-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.agent-mini { min-height: 72px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface-raised); }
+.agent-mini[open] { grid-column: span 2; }
+.agent-mini summary { cursor: pointer; padding: 12px; color: var(--text); font-weight: 650; }
+.agent-mini summary::marker { color: var(--accent); }
+.agent-mini [data-role-content] { padding: 0 12px 12px; color: var(--text-muted); font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-mini.has-content { border-color: var(--accent); }
+.task-log-line.warning { color: var(--warning); }
+.task-log-line.error { color: var(--negative); }
+.task-log-line small { display: block; margin-top: 2px; color: var(--text-muted); }
+@media (max-width: 760px) {
+  .agent-mini-grid { grid-template-columns: 1fr; }
+  .agent-mini[open] { grid-column: auto; }
+  .overview-actions { justify-content: flex-start; }
+}
+.button-row, .filters { justify-content: center; }
+.page-header { align-items: center; }
+.page-header > .button-row,
+.page-header > .watch-toolbar,
+.page-header > .collect-bar { align-self: center; }
+.watch-toolbar, .collect-bar, .config-actions, .save-bar, .mode-tabs, .indicator-group { align-items: center; }
+.config-actions, .save-bar { justify-content: center; }
+.mode-tabs .tab-btn {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 18px;
+  line-height: 1;
+}
+.industry-chip {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 11px;
+  line-height: 1;
+}
+.watch-remove {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 8px;
+  line-height: 1;
+}
+.star-btn {
+  height: 28px;
+  min-height: 28px;
+  line-height: 1;
+}
+.pagination-bar .icon-button {
+  height: 40px;
+  min-height: 40px;
+}
+.agent-card-foot .button {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+html[data-theme] .watch-remove {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 10px;
+  line-height: 1;
+}

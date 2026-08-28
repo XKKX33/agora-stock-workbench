@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>组合回测 · Hermes Quant</title>
+  <title>组合回测 · AGORA Quant</title>
   <link rel="stylesheet" href="/assets/css/theme.css">
   <link rel="icon" href="data:,">
 </head>
@@ -17,6 +17,7 @@
           <div class="eyebrow">Portfolio backtest · legacy ledger</div>
           <h1>组合回测</h1>
           <p>本页只消费旧台账 `ret1/ret3/ret5/ret10` 字段，并按<strong>不重叠调仓</strong>结算；独立实验收益 `t1_close`、`t2_open`…`t10_open` 请前往台账或 Agent 报告。</p>
+          <p class="source-note">数据来自 <code>picks</code> 表：<strong>每个信号日只有最新一次运行的名单</strong>。同一天重跑多次时，回测只用最后那一次——同一天算多份会让同一笔钱被重复计入，净值成倍虚高。要逐批次追溯请看<a href="p5_ledger.html">实验台账</a>。</p>
         </div>
         <div class="button-row">
           <a class="button" href="p5_ledger.html">实验台账</a>

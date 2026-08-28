@@ -18,6 +18,11 @@ def stocks(
     search: str | None = None,
     sort: Literal["rank", "total", "industry", "money_class"] = "rank",
     order: Literal["asc", "desc"] = "asc",
+    # 侧栏的全局批次选择器会带进这三个。不声明 FastAPI 会静默丢弃，
+    # 用户切了批次却永远看到最新那一批——与 /api/experiments 曾经的 run_id 缺陷同源。
+    run_id: str | None = Query(default=None, min_length=1, max_length=64),
+    as_of: str | None = Query(default=None, min_length=8, max_length=8),
+    strategy: str | None = Query(default=None, min_length=1, max_length=64),
 ) -> dict:
     return StocksService(request.app.state.repository).list(
         page=page,
@@ -28,6 +33,9 @@ def stocks(
         search=search,
         sort=sort,
         order=order,
+        run_id=run_id,
+        as_of=as_of,
+        strategy=strategy,
     )
 
 

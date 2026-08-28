@@ -11,6 +11,8 @@ const TERMINAL_EVENTS = new Set(["run.completed", "run.failed"]);
 const urlRunId = new URLSearchParams(window.location.search).get("run_id") || "";
 let selectedJobId = "";
 let lastSeq = 0;
+// 实时事件必须累积：只把新到的一条丢给渲染器，会把其余五格和整条时间线清空。
+let liveEvents = [];
 let eventSource = null;
 let reconnectTimer = null;
 const el = (id) => document.getElementById(id);
@@ -59,14 +61,96 @@ function renderStatus(job) {
 }
 function renderTimeline(events) { const host = el("agent-event-timeline"); if (!host) return; const sorted = [...timelineEvents(events)].sort((a, b) => eventSeq(a) - eventSeq(b)); host.innerHTML = sorted.length ? sorted.map((item) => renderEvent(item, { pending: (item?.event_type || item?.type) === "message.delta" })).join("") : `<div class="empty-state">暂无公开通话</div>`; }
 
+// 事件按股票分组后再按角色取最新：20 只候选共用七个角色名，只按角色去重的话
+// 后跑完的股票会覆盖先跑完的，六格拼出一场根本不存在的辩论——实测一屏里方法论/舆情/
+// 走势讲 002209.SZ、多方讲 000703.SZ、空方与反驳讲 001337.SZ、风控又回到 000703.SZ。
+const MATRIX_ROLES = ["methodology", "sentiment", "trend", "bull", "bear", "bull_counter"];
+// 选中的股票由用户决定；空串表示跟随最新事件（首次加载与实时流的默认行为）。
+let matrixStockCode = "";
+const eventStockCode = (event) => String(eventContent(event)?.ts_code ?? event?.ts_code ?? "");
+
+/** 事件流里出现过公开发言的股票代码，按首次出现顺序。 */
+export function matrixStockCodes(events = []) {
+  const codes = [];
+  const seen = new Set();
+  events.forEach((event) => {
+    const code = eventStockCode(event);
+    if (!code || seen.has(code)) return;
+    seen.add(code);
+    codes.push(code);
+  });
+  return codes;
+}
+
+/** 某只股票的每个角色最新一条事件。纯函数、不碰 DOM，便于直接测。
+ *
+ *  分组是这个面板的正确性前提：20 只候选共用七个角色名，不按 ts_code 隔开的话
+ *  后跑完的股票会覆盖先跑完的，六格拼出一场根本不存在的辩论。
+ */
+export function latestByRoleForStock(events = [], code = "") {
+  const latest = {};
+  if (!code) return latest;
+  events.forEach((event) => {
+    if (!event?.role || eventStockCode(event) !== code) return;
+    latest[event.role] = event;
+  });
+  return latest;
+}
+
+function syncMatrixPicker(events) {
+  const select = el("matrix-stock-select");
+  if (!select) return;
+  const codes = matrixStockCodes(events);
+  const options = codes.length ? codes : [];
+  const signature = options.join(",");
+  if (select.dataset.signature !== signature) {
+    select.dataset.signature = signature;
+    select.innerHTML = options.length
+      ? options.map((code) => `<option value="${escapeHtml(code)}">${escapeHtml(code)}</option>`).join("")
+      : `<option value="">等待公开消息…</option>`;
+  }
+  // 选中的股票不在这一批里（切换批次）时回落到第一只，而不是留一个空面板。
+  if (!options.includes(matrixStockCode)) matrixStockCode = options[0] || "";
+  if (select.value !== matrixStockCode) select.value = matrixStockCode;
+}
+
 export function renderDebateMatrix(events = []) {
+  syncMatrixPicker(events);
   const host = el("debate-matrix");
-  const latest = new Map();
-  events.forEach((event) => { if (event?.role) latest.set(event.role, event); });
-  if (host) host.innerHTML = ["methodology", "sentiment", "trend", "bull", "bear", "bull_counter"].map((role) => { const event = latest.get(role); return `<section class="debate-cell"><div class="debate-cell-head"><strong>${escapeHtml(roleLabel(role))}</strong>${event ? statusTag(event.event_type === "message.delta" ? "流式" : "已收到", event.event_type === "message.delta" ? "active" : "good") : statusTag("待发布", "muted")}</div><p>${escapeHtml(event ? displayContent(eventContent(event)) : "尚未收到公开消息")}</p>${event ? citationHtml(eventCitations(event)) : ""}</section>`; }).join("");
-  const risk = latest.get("risk_chair");
   const riskHost = el("risk-chair");
-  if (riskHost) riskHost.innerHTML = risk ? `<div class="risk-verdict"><strong>${escapeHtml(displayContent(eventContent(risk)))}</strong>${citationHtml(eventCitations(risk))}</div>` : `<div class="empty-state">暂无风控结论</div>`;
+  // 矩阵与风控必须来自同一只股票，否则拼出来的辩论是假的。
+  const latest = latestByRoleForStock(events, matrixStockCode);
+  if (host) {
+    host.innerHTML = matrixStockCode
+      ? MATRIX_ROLES.map((role) => { const event = latest[role]; return `<section class="debate-cell"><div class="debate-cell-head"><strong>${escapeHtml(roleLabel(role))}</strong>${event ? statusTag(event.event_type === "message.delta" ? "流式" : "已收到", event.event_type === "message.delta" ? "active" : "good") : statusTag("待发布", "muted")}</div><p>${escapeHtml(event ? displayContent(eventContent(event)) : "尚未收到公开消息")}</p>${event ? citationHtml(eventCitations(event)) : ""}</section>`; }).join("")
+      : `<div class="empty-state">暂无研判消息</div>`;
+  }
+  const risk = latest.risk_chair;
+  if (riskHost) riskHost.innerHTML = risk ? `<div class="risk-verdict"><strong>${escapeHtml(displayContent(eventContent(risk)))}</strong>${citationHtml(eventCitations(risk))}</div>` : `<div class="empty-state">${matrixStockCode ? "该股票尚无风控结论" : "暂无风控结论"}</div>`;
+}
+
+/** 供切换批次时重置选中股票：不重置的话上一批的代码会把新批次的面板判成空。 */
+export function resetMatrixStock() { matrixStockCode = ""; }
+
+const FINAL_SECTIONS = [["bull_case", "多方"], ["bear_case", "空方"], ["rebuttal", "多方反驳"], ["risk_control", "风控"]];
+// 四段叙述缺失时保持缺失标注，不编造文本：Pi 侧任何一轮没产出就整只股票不入终稿。
+export function renderFinalDebate(judgments = []) {
+  const host = el("final-debate");
+  if (!host) return;
+  const items = Array.isArray(judgments) ? judgments : [];
+  if (!items.length) { host.innerHTML = `<div class="empty-state">暂无终稿结论</div>`; return; }
+  host.innerHTML = items.map((item) => {
+    const stage = parseJson(item?.stage ?? item?.stage_json, {});
+    const head = `<div class="final-head"><strong>${escapeHtml(text(item?.rank))} · ${escapeHtml(text(item?.ts_code))}</strong><span>${escapeHtml(text(item?.name, ""))}</span>${statusTag(text(stage.decision || item?.stance, "未定"), "good")}<span class="mono">${escapeHtml(item?.score == null ? "—" : formatNumber(item.score, 1))}</span></div>`;
+    const thesis = stage.reason || item?.thesis;
+    const reason = thesis ? `<p class="final-thesis">${escapeHtml(String(thesis))}</p>` : "";
+    const rows = FINAL_SECTIONS.map(([key, label]) => {
+      const value = stage[key];
+      const filled = typeof value === "string" && value.trim() !== "";
+      return `<div class="final-row ${filled ? "" : "missing"}"><span>${escapeHtml(label)}</span><p>${escapeHtml(filled ? value : "缺失：该轮辩论未产出")}</p></div>`;
+    }).join("");
+    return `<article class="final-card">${head}${reason}${rows}</article>`;
+  }).join("");
 }
 
 export function renderReturnCards(summary) {
@@ -108,10 +192,25 @@ async function loadReturns(runId) {
   if (note) note.textContent = runId ? `run ${runId}` : "全部批次";
 }
 async function loadDashboard(runId) {
-  if (!runId) { renderStatus(null); renderTimeline([]); renderDebateMatrix([]); renderReturnCards(null); return; }
-  setLoading(true); clearError(); closeEventStream(); lastSeq = 0;
-  try { const [job, replay] = await Promise.all([query(`/api/agents/jobs/${encodeURIComponent(runId)}`), query(`/api/agents/jobs/${encodeURIComponent(runId)}/events`, { after_seq: 0, limit: 500 })]); renderStatus(job); const events = replay?.items || []; lastSeq = Number(replay?.next_seq || events.reduce((max, event) => Math.max(max, eventSeq(event)), 0)) || 0; renderTimeline(events); renderDebateMatrix(events); await loadReturns(runId); const streamState = (state) => { const host = el("stream-status"); if (host) { host.className = `tag ${state === "connected" ? "good" : state === "reconnecting" ? "pending" : "muted"}`; host.textContent = { connecting: "连接中", connected: "实时连接", reconnecting: "重连中", fallback: "请手动刷新", closed: "已结束" }[state] || state; } }; if (job.status === "running" || job.status === "queued") connectEventStream(runId, { onEvent: (event) => { renderTimeline([event]); renderDebateMatrix([event]); }, onState: streamState }); else streamState("closed");
+  if (!runId) { renderStatus(null); renderTimeline([]); renderDebateMatrix([]); renderFinalDebate([]); renderReturnCards(null); return; }
+  // 切批次必须重置选中股票：上一批的代码在新批次里不存在，留着会把面板判成空。
+  setLoading(true); clearError(); closeEventStream(); lastSeq = 0; liveEvents = []; resetMatrixStock();
+  try {
+    const [job, replay] = await Promise.all([query(`/api/agents/jobs/${encodeURIComponent(runId)}`), query(`/api/agents/jobs/${encodeURIComponent(runId)}/events`, { after_seq: 0, limit: 500 })]);
+    renderStatus(job);
+    liveEvents = replay?.items || [];
+    lastSeq = Number(replay?.next_seq || liveEvents.reduce((max, event) => Math.max(max, eventSeq(event)), 0)) || 0;
+    renderTimeline(liveEvents); renderDebateMatrix(liveEvents); renderFinalDebate(job?.judgments);
+    await loadReturns(runId);
+    const streamState = (state) => { const host = el("stream-status"); if (host) { host.className = `tag ${state === "connected" ? "good" : state === "reconnecting" ? "pending" : "muted"}`; host.textContent = { connecting: "连接中", connected: "实时连接", reconnecting: "重连中", fallback: "请手动刷新", closed: "已结束" }[state] || state; } };
+    if (job.status === "running" || job.status === "queued") connectEventStream(runId, { onEvent: (event) => { liveEvents = [...liveEvents, event]; renderTimeline(liveEvents); renderDebateMatrix(liveEvents); }, onState: streamState });
+    else streamState("closed");
   } finally { setLoading(false); }
 }
 async function refresh() { try { const jobs = await loadJobs(); const select = el("agent-job-select"); const contextRunId = getWorkContext().run_id; const contextJob = jobs.some((job) => (job.job_id || job.task_id || job.run_id) === contextRunId) ? contextRunId : ""; selectedJobId = urlRunId || selectedJobId || contextJob || select?.value || jobs[0]?.job_id || jobs[0]?.task_id || jobs[0]?.run_id || ""; if (selectedJobId) setWorkContext({ run_id: selectedJobId }); if (select && selectedJobId) select.value = selectedJobId; await loadDashboard(selectedJobId); setStatus("Agent 看板已更新", "ready"); } catch (error) { showError(error); } }
-initShell("agent-dashboard"); el("agent-dashboard-refresh")?.addEventListener("click", refresh); el("agent-job-select")?.addEventListener("change", (event) => { selectedJobId = event.target.value; setWorkContext({ run_id: selectedJobId }); loadDashboard(selectedJobId); }); refresh();
+initShell("agent-dashboard");
+el("agent-dashboard-refresh")?.addEventListener("click", refresh);
+el("agent-job-select")?.addEventListener("change", (event) => { selectedJobId = event.target.value; setWorkContext({ run_id: selectedJobId }); loadDashboard(selectedJobId); });
+// 换股票只需按已有事件重渲染，不必重新拉批次。
+el("matrix-stock-select")?.addEventListener("change", (event) => { matrixStockCode = event.target.value; renderDebateMatrix(liveEvents); });
+refresh();

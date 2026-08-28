@@ -58,6 +58,22 @@ def test_agents_judge_fails_loudly_when_unconfigured(client):
     assert error["code"] == "agent_unconfigured"
     assert error["message"]
     assert error["details"]["availability"] != "available"
+def test_agents_judge_forwards_scan_batch_context(client, monkeypatch):
+    captured = {}
+
+    def fake_start(**kwargs):
+        captured.update(kwargs)
+        return {"job_id": "agent-job", "status": "queued"}
+
+    monkeypatch.setattr(client.app.state.agent_judge_manager, "start", fake_start)
+    response = client.post(
+        "/api/agents/judge",
+        json={"candidates": 2, "depth": 2, "final": 1, "run_id": "scan-run", "as_of": "20260813"},
+    )
+
+    assert response.status_code == 202
+    assert captured["run_id"] == "scan-run"
+    assert captured["as_of"] == "20260813"
 def test_agents_status_exposes_pi_unavailable_without_old_engine_fallback(client):
     manager = client.app.state.agent_judge_manager
     manager.set_pi_agent_status({"availability": "unavailable", "reason": "启动失败"})

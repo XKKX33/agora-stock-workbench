@@ -32,7 +32,6 @@ from engine.schedule import (
     ScheduleConfig,
     ScheduleConfigError,
     decide_due_run,
-    is_trading_day,
     load_schedule_config,
     normalize_trade_date,
 )
@@ -57,6 +56,20 @@ TASK_KIND = "one_click_pipeline"
 # 补齐最近若干可见交易日的协调器任务。它自己不跑链条,只按日期串行驱动
 # TASK_KIND 的单日任务,便于前端用一个 job_id 观察整批补齐进度。
 TASK_KIND_BACKFILL = "one_click_backfill"
+
+# 步骤名 -> 中文动词短语,黑板日志「正在…」用。与 one_click.STEP_CONTRACT 的
+# display_label(名词,如「规则扫描」)不同:这里要能接在「正在」后面。
+STEP_DISPLAY = {
+    "preflight": "预检配置",
+    "calendar": "确认交易日历",
+    "market_data": "更新市场数据",
+    "backfill_returns": "回填历史收益",
+    "integrity": "检查数据完整性",
+    "scan": "执行规则扫描",
+    "collect_news": "采集板块舆情",
+    "agents": "进行 Agent 研判",
+    "persist_experiment": "落库实验结果",
+}
 
 # 链条比单次扫描长(摄取 + 扫描 + 回填 + 舆情 + 复盘),僵死判定阈值相应放宽。
 # 每步之间都会刷心跳,所以正常运行的长任务不会被误判;这个值只用来兜住
@@ -307,15 +320,46 @@ class PipelineManager:
             "group_counts": {},
             "as_of": None,
             "data_cutoff_at": None,
+            "progress": {"logs": []},
         }
         completed_atomically = False
 
         def on_step(snapshot: dict) -> None:
-            progress.update(snapshot)
-            self.tracker.progress(task_id, dict(progress))
+            """把进度快照翻译成黑板日志。
 
+            每次调用按 snapshot.steps 全量重建 logs：每个带 detail 的已完成
+            步骤一条完成日志，正在跑的当前步骤一条开始日志。全量重建保证
+            幂等——重复推送同一步骤不会产生重复日志，也修掉了旧实现里
+            "notify 在步骤开始时推送、此时该步还没进 steps、next() 找不到
+            导致 detail 恒为空"的时序 bug。
+            """
+            progress.update(snapshot)
+            current = progress.get("current_step")
+            steps = list(progress.get("steps") or [])
+            done = [item for item in steps if item.get("detail")]
+            logs: list[dict] = []
+            for item in done:
+                detail = str(item.get("detail"))
+                level = "warning" if item.get("status") == "warning" else "info"
+                logs.append({"at": self.tracker.now(), "level": level, "message": detail, "detail": ""})
+            if current and not any(item.get("name") == current for item in done):
+                label = STEP_DISPLAY.get(current, current)
+                logs.append({"at": self.tracker.now(), "level": "info", "message": f"正在{label}…", "detail": ""})
+            message = done[-1]["detail"] if done else (f"正在{STEP_DISPLAY.get(current, current or '准备')}…" if current else "准备启动")
+            progress["progress"] = {
+                "stage": current,
+                "step": len(steps),
+                "total": len(STEP_NAMES),
+                "percent": int(len(steps) * 100 / len(STEP_NAMES)),
+                "message": message,
+                "logs": logs[-100:],
+            }
+            self.tracker.progress(task_id, dict(progress))
         def on_complete(result: dict, experiment: tuple[dict, object, object]) -> None:
             nonlocal completed_atomically
+            # 成功路径的 result 由 make_result 构造，不含运行期 progress。
+            # 直接落库会把 on_step 积累的黑板日志整体覆盖掉，所以这里合并。
+            merged = {**result, "progress": progress.get("progress")}
             run_row, decisions, scan_result = experiment
             now = self.tracker.now()
             with Store(self.db_path, ensure_schema=True) as store:
@@ -326,7 +370,7 @@ class PipelineManager:
                         "task_id": task_id,
                         "now": now,
                         "trade_date": result["as_of"],
-                        "result_json": TaskTracker._dump(result),
+                        "result_json": TaskTracker._dump(merged),
                     },
                     scan_completion=scan_completion_payload(scan_result),
                 )

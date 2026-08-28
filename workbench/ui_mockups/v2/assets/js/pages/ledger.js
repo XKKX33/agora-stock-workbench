@@ -44,7 +44,11 @@ let currentPage = 1;
 function apiDate(value) { return value ? value.replaceAll("-", "") : ""; }
 
 function filters() {
-  return {
+  // 批次下拉框排在 workContextParams() 之后：全局工作上下文里也带 run_id，
+  // 用户在本页显式选了批次就该以本页为准；选"全部批次"则清掉上下文的锁定，
+  // 否则会出现"选了全部却只显示一个批次"。
+  const picked = document.querySelector("#run-id")?.value || "";
+  const params = {
     ...workContextParams(),
     as_of: apiDate(document.querySelector("#as-of").value) || getWorkContext().as_of,
     group: document.querySelector("#group").value,
@@ -53,12 +57,34 @@ function filters() {
     page: currentPage,
     per_page: PAGE_SIZE,
   };
+  if (picked) params.run_id = picked;
+  else delete params.run_id;
+  return params;
 }
 
 // /api/returns/summary 不分页，且实验组的参数名是 group_name。
 function summaryFilters() {
   const { page, per_page, group, ...activeFilters } = filters();
   return { ...activeFilters, group_name: group };
+}
+
+/** 填充批次下拉框。批次列表由 /api/experiments/batches 给出，不从分页数据里提取——
+ *  一页只有 200 行，更早的批次不在这一页，下拉框会缺项。 */
+async function loadBatches() {
+  const select = document.querySelector("#run-id");
+  if (!select) return;
+  const picked = select.value;
+  const payload = await query("/api/experiments/batches").catch(() => ({ items: [] }));
+  const items = payload.items || [];
+  select.innerHTML = [`<option value="">全部批次</option>`]
+    .concat(items.map((item) => {
+      const stamp = runStamp(item.created_at) || "时间未记录";
+      const label = `${formatDate(item.as_of)} · ${stamp}`;
+      return `<option value="${escapeHtml(item.run_id)}">${escapeHtml(label)}</option>`;
+    }))
+    .join("");
+  // 保留用户已选的批次；它已被删除时回落到"全部批次"而不是静默换一个批次。
+  select.value = items.some((item) => item.run_id === picked) ? picked : "";
 }
 
 async function load() {
@@ -198,16 +224,30 @@ function entryKind(status) {
   return "muted";
 }
 
+/** 批次运行时刻，精确到分钟：同一信号日跑多次时这是唯一能区分的依据。 */
+function runStamp(value) {
+  if (!value) return "";
+  const text = String(value);
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  return match ? `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}` : text.slice(0, 16);
+}
+
 function renderRows(items) {
-  let lastDate = null;
+  // 分组键必须带 run_id：同一信号日可以跑多次（实测 20260821 跑了 3 次），
+  // 只按 as_of 分组的话三个批次全挤在一条分隔线下，同一只票重复出现却看不出区别，
+  // 用户无法判断自己在看哪一次的入选结果。
+  let lastKey = null;
   const rows = [];
   items.forEach((item) => {
-    if (item.as_of !== lastDate) {
-      lastDate = item.as_of;
-      rows.push(`<tr class="date-divider"><td colspan="${COLUMN_COUNT}"><span>${escapeHtml(formatDate(item.as_of))}</span><small>信号日</small></td></tr>`);
+    const key = `${item.as_of}|${item.run_id}`;
+    if (key !== lastKey) {
+      lastKey = key;
+      const stamp = runStamp(item.run_created_at);
+      const batch = String(item.run_id || "").slice(0, 8);
+      rows.push(`<tr class="date-divider"><td colspan="${COLUMN_COUNT}"><span>${escapeHtml(formatDate(item.as_of))}</span><small>信号日 · 运行于 ${escapeHtml(stamp || "时间未记录")}${batch ? ` · 批次 ${escapeHtml(batch)}` : ""}</small></td></tr>`);
     }
     rows.push(`<tr>
-      <td class="mono">${escapeHtml(formatDate(item.as_of))}</td>
+      <td class="mono">${escapeHtml(formatDate(item.as_of))}<br><span class="mono muted run-stamp">${escapeHtml(runStamp(item.run_created_at) || "—")}</span></td>
       <td>${statusTag(GROUP_LABELS[item.group_name] || item.group_name, "active")}</td>
       <td class="mono">${escapeHtml(formatNumber(item.rank, 0))}</td>
       <td><strong>${escapeHtml(item.name || "—")}</strong><br><span class="mono muted">${escapeHtml(item.ts_code)}</span></td>
@@ -233,5 +273,23 @@ document.querySelector("#ledger-filters")?.addEventListener("submit", (event) =>
 document.querySelector("#clear-filters")?.addEventListener("click", () => { document.querySelector("#ledger-filters").reset(); currentPage = 1; load(); });
 document.querySelector("#prev-page")?.addEventListener("click", () => { if (currentPage > 1) { currentPage -= 1; load(); } });
 document.querySelector("#next-page")?.addEventListener("click", () => { currentPage += 1; load(); });
-document.querySelector("#refresh")?.addEventListener("click", load);
+document.querySelector("#refresh")?.addEventListener("click", () => { loadBatches(); load(); });
+// 换批次等于换了一份名单，页码必须回到第一页，否则会停在旧批次的第 3 页上看到空表。
+document.querySelector("#run-id")?.addEventListener("change", () => { currentPage = 1; load(); });
+loadBatches();
 load();
+// 侧栏全局批次选择器改动时，台账的批次下拉框跟着同步：两个控件必须一致，
+// 否则侧栏显示批次 A、台账表格却是「全部批次」，用户不知道以哪个为准。
+window.addEventListener("hermes:batch-changed", (event) => {
+  const runId = event.detail?.run_id || "";
+  const select = document.querySelector("#run-id");
+  if (select && select.value !== runId) {
+    // 全局选中的批次可能不在当前信号日筛选下的选项里，补一项再选中。
+    if (runId && !Array.from(select.options).some((option) => option.value === runId)) {
+      select.insertAdjacentHTML("beforeend", `<option value="${runId}">${runId.slice(0, 8)}</option>`);
+    }
+    select.value = runId;
+  }
+  currentPage = 1;
+  load();
+});

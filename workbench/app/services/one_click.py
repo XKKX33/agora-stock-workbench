@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from engine.db import Store
 from engine.experiments import (
     build_experiment_decisions,
     candidate_pool_hash,
+    required_entry_bar_codes,
     required_entry_limit_dates,
 )
 from engine.returns import calculate_experiment_returns
@@ -29,6 +31,7 @@ from engine.ingest_tushare import (
     confirm_latest_trade_date,
     ingest_calendar,
     ingest_daily_limits,
+    ingest_history,
     ingest_snapshot,
 )
 from engine.run_scan import (
@@ -42,7 +45,7 @@ from engine.run_scan import (
 )
 from engine.schedule import is_trading_day, normalize_trade_date
 from engine.config import load_settings_with_local, load_strategy
-from engine.methodology import build_agent_brief
+from engine.methodology import ANALYST_ROLES, DEBATE_ROUNDS, build_agent_brief
 from engine.visibility import (
     ensure_visible,
     local_base_session,
@@ -311,6 +314,8 @@ class DefaultOneClickOperations:
                 f"读取 {prepared.as_of} 行情快照 {prepared.snapshot_count} 只，"
                 f"候选池 {candidate_count} 只"
             )
+        if warnings:
+            detail = f"{detail}；{'；'.join(warnings)}"
         return {
             "_status": "warning" if warnings else "ok",
             "_detail": detail,
@@ -350,17 +355,43 @@ class DefaultOneClickOperations:
                     daily_limit_rows = ingest_daily_limits(
                         store, context.market_client, dates
                     )
+            # 涨跌停价补了不代表日线也在:每轮扫描只回补当轮候选池的日线,
+            # 更早批次的票在后续买入日整片缺行,成交状态会永远停在
+            # entry_bar_missing。这里把这些票的日线补齐,收益才算得出来。
+            bar_codes, bar_start = required_entry_bar_codes(store, context.exchange)
+            entry_bar_rows = 0
+            if bar_codes:
+                if not context.online or context.market_client is None:
+                    warnings.append(
+                        f"历史实验有 {len(bar_codes)} 只票缺买入日行情，"
+                        "当前离线无法补采"
+                    )
+                else:
+                    entry_bar_rows = ingest_history(
+                        store,
+                        context.market_client,
+                        bar_codes,
+                        bar_start or visible_as_of,
+                        visible_as_of,
+                    )
             summary = calculate_experiment_returns(
                 store, exchange=context.exchange, visible_max=visible_as_of
             )
+        counts_text = (
+            f"更新 {summary.rows_written} 条，已成交 {summary.filled}，"
+            f"待成交 {summary.pending}，无法成交 {summary.unavailable}"
+        )
         return {
             "_status": "warning" if warnings else "ok",
             "_detail": (
-                f"回填收益：更新 {summary.rows_written} 条，已成交 {summary.filled}，"
-                f"待成交 {summary.pending}，无法成交 {summary.unavailable}"
+                f"回填收益：{counts_text}"
+                if not warnings
+                else f"回填收益有告警：{counts_text}；{'；'.join(warnings)}"
             ),
             "required_limit_dates": dates,
             "daily_limit_rows": int(daily_limit_rows),
+            "required_entry_bar_codes": bar_codes,
+            "entry_bar_rows": int(entry_bar_rows),
             "rows_written": summary.rows_written,
             "updated": summary.rows_written,
             "filled": summary.filled,
@@ -387,9 +418,15 @@ class DefaultOneClickOperations:
             )
         payload["_status"] = "warning" if warnings else "ok"
         payload["warnings"] = warnings
+        # 有告警还写"通过"会让同一份报告自相矛盾：状态说 warning，文案说没事。
+        # 文案必须跟着状态走，并把原因直接拼进去。
+        summary = (
+            f"候选 {payload['candidate_count']}，上下文 {payload['context_count']}"
+        )
         payload["_detail"] = (
-            f"完整性检查通过：候选 {payload['candidate_count']}，"
-            f"上下文 {payload['context_count']}"
+            f"完整性检查通过：{summary}"
+            if not warnings
+            else f"完整性检查有告警：{summary}；{'；'.join(warnings)}"
         )
         return payload
 
@@ -649,7 +686,25 @@ class DefaultOneClickOperations:
             pi_run_id = client.start_judgment(request, run_id=context.run_id)
             if pi_run_id != context.run_id:
                 raise RuntimeError("Pi Agent 返回的 run_id 与 pipeline task_id 不一致")
+            # 研判要跑三十多分钟，期间这两张表的心跳原先一次都不刷：agent_runs 只在
+            # 开始和收尾写，task_runs 根本没人写。启动回收按心跳判活，于是一个正常
+            # 运行的流程看起来和"进程已死"一模一样。收到任何事件都证明还活着。
+            #
+            # 但一轮有数百个事件，每个都开一次 DuckDB 连接太贵。节流到 30 秒一次：
+            # 回收窗口是 15 分钟，30 秒的精度绰绰有余。
+            heartbeat_interval = 30.0
+            last_heartbeat = time.monotonic()
+            # 与 AgentJudgeManager 同一口径：分析每只 3 角色、辩论每只 4 轮，
+            # 总步数 = 候选数 × 7，进度按「收到的 message.completed」推进。
+            total_steps = len(candidates) * (len(ANALYST_ROLES) + len(DEBATE_ROUNDS))
+            done_steps = 0
             for event in client.stream_events(pi_run_id, after_seq=0):
+                if time.monotonic() - last_heartbeat >= heartbeat_interval:
+                    last_heartbeat = time.monotonic()
+                    heartbeat_now = datetime.now(timezone.utc).isoformat()
+                    with Store(context.db_path, ensure_schema=True) as store:
+                        store.update_agent_run(context.run_id, heartbeat_at=heartbeat_now)
+                        store.task_heartbeat(context.run_id, heartbeat_now)
                 event_bus.publish(
                     {
                         "run_id": context.run_id,
@@ -661,6 +716,23 @@ class DefaultOneClickOperations:
                         "citations": event.get("citations", []),
                     }
                 )
+                if str(event.get("event_type") or event.get("type") or "") == "message.completed":
+                    done_steps += 1
+                    role = str(event.get("role") or "")
+                    code = str(event.get("ts_code") or "")
+                    stage = "debate" if role in DEBATE_ROUNDS else "analysis"
+                    progress = {
+                        "stage": stage,
+                        "step": min(done_steps, total_steps),
+                        "total": total_steps,
+                        "percent": int(min(done_steps, total_steps) * 100 / total_steps) if total_steps else 0,
+                        "message": f"{role} · {code}" if code else role,
+                        "role": role,
+                        "ts_code": code,
+                    }
+                    with Store(context.db_path, ensure_schema=True) as store:
+                        store.update_agent_run(context.run_id, stage=stage, progress_json=json.dumps(progress, ensure_ascii=False))
+                        store.task_heartbeat(context.run_id, datetime.now(timezone.utc).isoformat())
             result_model = client.get_result(pi_run_id, request)
             result = result_model.model_dump(mode="json")
             names = {
@@ -771,11 +843,15 @@ class DefaultOneClickOperations:
                 "final_count": 0,
                 "warnings": [*input_warnings, detail["message"]],
             }
+        agent_summary = (
+            f"送审 {candidate_count}，深度 {actual_depth}，最终 {actual_final}"
+        )
         return {
             "_status": "warning" if warnings else "ok",
             "_detail": (
-                f"Agent 研判完成：送审 {candidate_count}，深度 {depth}，"
-                f"最终 {actual_final}"
+                f"Agent 研判完成：{agent_summary}"
+                if not warnings
+                else f"Agent 研判有告警：{agent_summary}；{'；'.join(warnings)}"
             ),
             "candidates": candidate_count,
             "depth": actual_depth,
@@ -827,11 +903,17 @@ class DefaultOneClickOperations:
             for name, count in decisions.groupby("group_name").size().items()
         }
         context.group_counts = counts
+        summary = (
+            f"规则 {counts.get('rule', 0)}，AI {counts.get('ai', 0)}，"
+            f"混合 {counts.get('hybrid', 0)}，基准 {counts.get('benchmark', 0)}"
+        )
         return {
             "_status": "warning" if warnings else "ok",
+            # 缺组落库仍算完成，但文案不能只报"已生成"，否则看不出缺了哪一组。
             "_detail": (
-                f"可用实验组已生成并进入原子提交流程：规则 {counts.get('rule', 0)}，AI {counts.get('ai', 0)}，"
-                f"混合 {counts.get('hybrid', 0)}，基准 {counts.get('benchmark', 0)}"
+                f"可用实验组已生成并进入原子提交流程：{summary}"
+                if not warnings
+                else f"实验组已落库但不完整：{summary}；{'；'.join(warnings)}"
             ),
             "group_counts": counts,
             "warnings": warnings,
@@ -893,6 +975,33 @@ class OneClickRunner:
         steps: list[dict] = []
         failed_steps: set[str] = set()
 
+        def progress_payload(current: str) -> dict:
+            """进度快照。开始推和结束推共用一份构造，否则两份必然漂移。"""
+            return {
+                "current_step": current,
+                "steps": list(steps),
+                "as_of": context.as_of,
+                "group_counts": dict(context.group_counts),
+                "data_cutoff_at": context.data_cutoff_at,
+            }
+
+        def notify(current: str) -> None:
+            """步骤**开始**时推一次「谁在跑」。
+
+            只在结束时推的话，`current_step` 记的是「最后跑完的一步」而不是
+            「正在跑的一步」。`agents` 是 20 只股票乘多个角色的串行模型调用，
+            实测 19 分钟，这期间页面一直显示上一步 collect_news，看着像卡死。
+
+            这里的推送失败静默：还没有 step 对象可以挂告警，而结束时的
+            publish_step 会再推一次，那次失败会被记成 step 的 warning。
+            """
+            if on_step is None:
+                return
+            try:
+                on_step(progress_payload(current))
+            except Exception:
+                pass
+
         def publish_step(name: str, step: dict) -> None:
             steps.append(step)
             if name == "persist_experiment":
@@ -900,15 +1009,7 @@ class OneClickRunner:
             if on_step is None:
                 return
             try:
-                on_step(
-                    {
-                        "current_step": name,
-                        "steps": list(steps),
-                        "as_of": context.as_of,
-                        "group_counts": dict(context.group_counts),
-                        "data_cutoff_at": context.data_cutoff_at,
-                    }
-                )
+                on_step(progress_payload(name))
             except Exception as error:
                 detail = safe_error_message(error)
                 step["status"] = "warning"
@@ -937,6 +1038,7 @@ class OneClickRunner:
                     },
                 )
                 continue
+            notify(name)
             try:
                 payload = getattr(self.operations, name)(context)
                 data = dict(payload or {})
@@ -968,16 +1070,22 @@ class OneClickRunner:
                 "strategy": strategy,
                 "online": online,
                 "current_step": steps[-1]["name"] if steps else None,
-                "steps": steps,
                 "group_counts": dict(context.group_counts),
                 "data_cutoff_at": context.data_cutoff_at,
+                "steps": steps,
                 "has_warnings": bool(warning_steps or skipped_steps),
                 "warning_count": len(warning_steps),
                 "skipped_count": len(skipped_steps),
                 "warnings": [
                     {
                         "step": step["name"],
+                        # detail 是这一步的成功文案；真实告警原因在 data.warnings 里。
+                        # 只给 detail 会让汇总看起来像“全部正常”，这里必须一起带出来。
                         "detail": step["detail"],
+                        "reasons": [
+                            str(item)
+                            for item in (step["data"].get("warnings") or [])
+                        ],
                         "error": step["data"].get("error"),
                     }
                     for step in warning_steps

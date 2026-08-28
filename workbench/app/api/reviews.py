@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from app.dependencies import get_repository
+from app.dependencies import get_repository, validated_trade_date
 from app.services.reviews import ReviewService
 
 router = APIRouter()
@@ -8,7 +8,7 @@ router = APIRouter()
 
 @router.get("/reviews")
 def get_review(
-    trade_date: str | None = None,
+    trade_date: str | None = Depends(validated_trade_date),
     strategy: str | None = None,
     repository=Depends(get_repository),
 ) -> dict:

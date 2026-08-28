@@ -17,14 +17,32 @@ from engine.db import Store
 
 
 def rsi_series(close: pd.Series, n: int) -> pd.Series:
-    """RSI 序列:n 日 ewm(alpha=1/n, adjust=False) 平均涨跌幅。"""
+    """RSI 序列:n 日 ewm(alpha=1/n, adjust=False) 平均涨跌幅。
+
+    预热期(前 n 根)返回 NaN。ewm 从第一个样本就吐数,但用 1 天涨跌算 6 日 RSI
+    只会得到 100 或 0——那是预热噪音,不是超买超卖信号,不能当指标发出去。
+    """
     diff = close.diff()
     up = diff.clip(lower=0)
     down = -diff.clip(upper=0)
     avg_up = up.ewm(alpha=1 / n, adjust=False).mean()
     avg_down = down.ewm(alpha=1 / n, adjust=False).mean()
     rs = avg_up / avg_down
-    return 100 - 100 / (1 + rs)
+    series = 100 - 100 / (1 + rs)
+    return _mask_warmup(series, n)
+
+
+def _mask_warmup(series: pd.Series, periods: int) -> pd.Series:
+    """让 ewm 指标和 `rolling(periods)` 口径一致:第 `periods` 根起才有值。
+
+    rolling 天然遵守这个语义,ewm 没有——它从第一根就吐数。不统一的话同一份
+    K 线里 ma5 第 5 根就有值、KDJ 却要等到第 10 根,读图的人没法判断哪个是真的。
+    """
+    if periods <= 1:
+        return series
+    out = series.copy()
+    out.iloc[: min(periods - 1, len(out))] = np.nan
+    return out
 
 
 class KlineService:
@@ -217,20 +235,27 @@ class KlineService:
         frame["ma20"] = close.rolling(20).mean()
         frame["ma60"] = close.rolling(60).mean()
         # MACD:ema12/ema26, dif=ema12-ema26, dea=dif 9 日 ema, macd=(dif-dea)*2
+        # 预热掩码是必须的:ewm 从第一根就给数,首日 ema12==ema26==close 会让
+        # dif/macd 恰好是 0.0——画在图上是贴着零轴的线,像"多空平衡"的真实信号,
+        # 其实只是还没算出来。dif 第 26 根起成立;dea 要 9 个 dif,即第 34 根起。
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         dif = ema12 - ema26
-        frame["ema12"] = ema12
-        frame["ema26"] = ema26
-        frame["dif"] = dif
-        frame["dea"] = dif.ewm(span=9, adjust=False).mean()
-        frame["macd"] = (dif - frame["dea"]) * 2
+        frame["ema12"] = _mask_warmup(ema12, 12)
+        frame["ema26"] = _mask_warmup(ema26, 26)
+        frame["dif"] = _mask_warmup(dif, 26)
+        dea = dif.ewm(span=9, adjust=False).mean()
+        frame["dea"] = _mask_warmup(dea, 26 + 8)
+        frame["macd"] = _mask_warmup((dif - dea) * 2, 26 + 8)
         # KDJ(9 日):RSV=(close-llv)/(hhv-llv)*100,K/D 用 ewm(alpha=1/3)
+        # rsv 前 8 根是 NaN,但 ewm 会跳过 NaN 继续算,等于用不足 9 根的样本出 K 值。
         low9 = low.rolling(9).min()
         high9 = high.rolling(9).max()
         rsv = (close - low9) / (high9 - low9) * 100
-        frame["k"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
-        frame["d"] = frame["k"].ewm(alpha=1 / 3, adjust=False).mean()
+        k = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+        d = k.ewm(alpha=1 / 3, adjust=False).mean()
+        frame["k"] = _mask_warmup(k, 9)
+        frame["d"] = _mask_warmup(d, 9)
         frame["j"] = 3 * frame["k"] - 2 * frame["d"]
         # RSI6/12/24
         for n in (6, 12, 24):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta
 from collections.abc import Iterable, Mapping
 from numbers import Integral, Real
 from typing import Any
@@ -73,10 +74,24 @@ _DECISIONS_STAGE = "_experiment_decisions_stage"
 
 # 成交状态:同一条决策的 10 个 horizon 共享同一次成交,因此行级判断即可。
 #   filled            -- 买到了,entry_price 有值
-#   entry_unavailable -- 买不到,涨停封板或买入日没有 K 线
+#   entry_unavailable -- 买不到,涨停封板。这是市场事实,终局。
+#   entry_bar_missing -- 买入日没有 K 线。**不是终局**:本项目每轮扫描只回补
+#                        当轮候选池的日线(见 run_scan._backfill_history),所以
+#                        更早批次的票在后续买入日经常整片缺行。补上行情就能算出
+#                        成交,把它当终局会让这些样本永久失去测量机会。
 #   pending_entry     -- 还没定,通常是缺涨跌停价或行情没到
-_ENTRY_UNAVAILABLE_STATUSES = ("entry_unavailable", "entry_bar_missing")
+_ENTRY_UNAVAILABLE_STATUSES = ("entry_unavailable",)
 ENTRY_STATUSES = ("filled", "entry_unavailable", "pending_entry")
+
+
+def _shift_iso(moment: str, seconds: float) -> str:
+    """把 ISO 时刻平移若干秒，仍返回 ISO 字符串。
+
+    库里存的是 ISO 文本，字符串比较对同一时区的等长格式是正确的排序；
+    这里只负责算出比较基准，不改变存储格式。
+    """
+    parsed = datetime.fromisoformat(moment)
+    return (parsed + timedelta(seconds=seconds)).isoformat()
 
 
 def entry_status_predicate(entry_status: str, *, alias: str) -> str:
@@ -217,6 +232,95 @@ class ExperimentMixin:
             raise ValueError(f"成功实验批次不可标记失败: {run_id}")
         raise ValueError(f"实验批次状态不可标记失败: {run_id}/{current[0]}")
 
+    def reclaim_stale_experiment_runs(
+        self, *, now: str, max_idle_seconds: float = 7200.0
+    ) -> list[str]:
+        """把无人照看的 running 批次标记为失败，返回被回收的 run_id。
+
+        `running` 在库里区分不出「正在跑」和「跑它的进程早就死了」。收尾逻辑
+        写在流程函数尾部，进程被强杀就永远不执行，批次于是永久停在 running。
+
+        判据是「多久没动静」而不是「是否 running」：同一个库目录可能同时起了
+        两个服务实例，无条件回收会把另一个进程正在跑的批次误标成失败。边界取
+        `<=` 而不是 `<`，让窗口值本身就是「达到即回收」的语义。
+        """
+        cutoff = _shift_iso(now, -max_idle_seconds)
+        stale = self.con.execute(
+            """
+            SELECT run_id FROM experiment_runs
+            WHERE status = 'running' AND created_at <= ?
+            ORDER BY created_at
+            """,
+            [cutoff],
+        ).fetchall()
+        error_json = '{"reason": "进程中断，启动时回收未收尾的实验批次"}'
+        for (run_id,) in stale:
+            self.con.execute(
+                """
+                UPDATE experiment_runs
+                SET status = 'failed', finished_at = ?, error_json = ?
+                WHERE run_id = ? AND status = 'running'
+                """,
+                [now, error_json, run_id],
+            )
+        return [run_id for (run_id,) in stale]
+
+    def reclaim_stale_agent_runs(
+        self, *, now: str, max_idle_seconds: float = 7200.0
+    ) -> list[str]:
+        """同上，但 agent_runs 有 heartbeat_at，按最后一次报活判定。"""
+        cutoff = _shift_iso(now, -max_idle_seconds)
+        stale = self.con.execute(
+            """
+            SELECT run_id FROM agent_runs
+            WHERE status IN ('queued', 'running')
+              AND COALESCE(heartbeat_at, created_at) <= ?
+            ORDER BY created_at
+            """,
+            [cutoff],
+        ).fetchall()
+        error_json = '{"reason": "进程中断，启动时回收未收尾的 Agent 运行"}'
+        for (run_id,) in stale:
+            self.con.execute(
+                """
+                UPDATE agent_runs
+                SET status = 'failed', finished_at = ?, error_json = ?
+                WHERE run_id = ? AND status IN ('queued', 'running')
+                """,
+                [now, error_json, run_id],
+            )
+        return [run_id for (run_id,) in stale]
+
+    def reclaim_stale_task_runs(
+        self, *, now: str, max_idle_seconds: float = 7200.0
+    ) -> list[str]:
+        """同上，作用于 task_runs——前端看板和 /api/pipelines/{id} 读的就是这张表。
+
+        `claim_task` 只是在抢占时把僵死行绕开，行本身仍留着 running，于是任务
+        中心永远显示「正在跑」，轮询也永远等不到终态。回收必须连它一起做。
+        """
+        cutoff = _shift_iso(now, -max_idle_seconds)
+        stale = self.con.execute(
+            """
+            SELECT task_id FROM task_runs
+            WHERE status IN ('queued', 'running')
+              AND COALESCE(heartbeat_at, started_at, created_at) <= ?
+            ORDER BY created_at
+            """,
+            [cutoff],
+        ).fetchall()
+        error_json = '{"reason": "进程中断，启动时回收未收尾的任务"}'
+        for (task_id,) in stale:
+            self.con.execute(
+                """
+                UPDATE task_runs
+                SET status = 'failed', finished_at = ?, error_json = ?
+                WHERE task_id = ? AND status IN ('queued', 'running')
+                """,
+                [now, error_json, task_id],
+            )
+        return [task_id for (task_id,) in stale]
+
     def record_failed_experiment_attempt(
         self,
         *,
@@ -355,7 +459,23 @@ class ExperimentMixin:
         task_completion: Mapping[str, Any] | None = None,
         scan_completion: Mapping[str, Any] | None = None,
     ) -> None:
-        """原子写入扫描、选股、四组实验和任务成功状态。"""
+        """原子写入扫描、选股、四组实验和任务成功状态。
+
+        一次运行落进 5 张表，其中**两种保存语义**并存，改这里前先看清：
+
+        累积（每次运行独立留存，主键含 run_id）：
+        - `experiment_runs`：批次元数据（as_of / created_at / 候选数 / 哈希 / 权重）
+        - `experiment_decisions`：四组名单，供台账逐批次追溯
+        - `experiment_returns`：成交与各期收益，由后续运行的 backfill 步补
+
+        覆盖（同一信号日只留最后一次，主键不含 run_id）：
+        - `picks`：先按 (as_of, strategy) 整组删除再插入。回测与 ML 要的是「每个交易日
+          一份不重叠的名单」，同一天留多份会让同一笔钱被重复计入，净值成倍虚高。
+        - `scan_runs` / `scan_rows`：同一 (as_of, strategy) 的扫描结果整组替换
+
+        幂等：同一 run_id 已是 succeeded 时直接返回（只补任务终态），不重复写；
+        已是 failed 的 run_id 不允许复用——失败批次的元数据不可信，必须换新 run_id。
+        """
         self._validate_run_row(run_row)
         run_id = str(run_row["run_id"])
         staged = self._validated_decisions(run_row, decisions)
@@ -467,10 +587,11 @@ class ExperimentMixin:
     def experiment_entries_awaiting_limits(self) -> pd.DataFrame:
         """成功批次里成交结果还没定下来的四组明细。
 
-        成交只有两种终局:买到了(``entry_price`` 有值)、买不到(涨停封板或当天
-        没有 K 线)。两者都没出现就说明还缺行情或涨跌停价,需要继续补数据。
-        ``experiment_returns`` 里同一条决策的 10 个 horizon 共享同一次成交,
-        所以只要存在任意一行落到终局就算定了。
+        成交只有一种终局:买到了(``entry_price`` 有值)或买不到(涨停封板)。
+        两者都没出现就说明还缺行情或涨跌停价,需要继续补数据。买入日没有 K 线
+        (``entry_bar_missing``)不算终局,补上日线后仍要重算,所以这些行会持续
+        出现在结果里。``experiment_returns`` 里同一条决策的 10 个 horizon 共享
+        同一次成交,所以只要存在任意一行落到终局就算定了。
         """
         unavailable = ", ".join(f"'{status}'" for status in _ENTRY_UNAVAILABLE_STATUSES)
         return self.con.execute(

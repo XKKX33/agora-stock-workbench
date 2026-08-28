@@ -1,4 +1,4 @@
-# Hermes 股票量化工作台 — 依赖
+# AGORA 股票量化工作台 — 依赖
 #
 # 本机环境约束:唯一可用 Python 是 C:\Users\xuan\anaconda3\python.exe,
 # 无 venv、禁止新建环境。此文件用于记录真实依赖,不用于新建环境安装。

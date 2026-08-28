@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, Query, status
 from pydantic import BaseModel
 
-from app.dependencies import get_returns_service
+from app.dependencies import TS_CODE_PATTERN, get_returns_service
 from app.schemas.experiments import EntryStatus
 from engine.returns import HORIZONS
 
@@ -36,7 +36,7 @@ def calculate_returns(
 def list_returns(
     run_id: Annotated[str | None, Query(min_length=1)] = None,
     group_name: Annotated[str | None, Query(min_length=1)] = None,
-    ts_code: Annotated[str | None, Query(pattern=r"^[0-9]{6}\.(SZ|SH|BJ)$")] = None,
+    ts_code: Annotated[str | None, Query(pattern=TS_CODE_PATTERN)] = None,
     horizon: str | None = Query(
         default=None, pattern="^(" + "|".join(HORIZONS) + ")$"
     ),
@@ -59,7 +59,7 @@ def returns_summary(
     run_id: Annotated[str | None, Query(min_length=1)] = None,
     as_of: Annotated[str | None, Query(pattern=r"^[0-9]{8}$")] = None,
     group_name: Annotated[str | None, Query(min_length=1)] = None,
-    ts_code: Annotated[str | None, Query(pattern=r"^[0-9]{6}\.(SZ|SH|BJ)$")] = None,
+    ts_code: Annotated[str | None, Query(pattern=TS_CODE_PATTERN)] = None,
     entry_status: EntryStatus | None = None,
     service=Depends(get_returns_service),
 ) -> dict:

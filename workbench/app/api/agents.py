@@ -7,12 +7,15 @@ from collections.abc import Iterator
 
 from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.dependencies import get_agent_judge_manager
+from app.dependencies import (
+    TS_CODE_PATTERN,
+    get_agent_judge_manager,
+    validated_signal_date,
+)
 from app.errors import WorkbenchError, safe_error_message
 from app.schemas.agent_events import AgentEventsResponse
-from app.services.agents import AgentJudgeManager
 
 router = APIRouter()
 
@@ -20,7 +23,8 @@ router = APIRouter()
 class SingleJudgeRequest(BaseModel):
     """对单只股票发起深度研判(三位分析师+多空辩论+风控)。"""
 
-    ts_code: str
+    # 格式明显不对的代码不该先起后台线程、再花一次模型调用才发现。
+    ts_code: str = Field(pattern=TS_CODE_PATTERN)
     force: bool = False
 
 
@@ -37,6 +41,9 @@ class JudgeRequest(BaseModel):
     ts_codes: list[str] | None = None
     # force=True 绕过"相同参数已成功"的幂等拦截,强制重跑
     force: bool = False
+    # 选股批次身份由前端工作上下文传入,后端按此批次冻结输入。
+    run_id: str | None = None
+    as_of: str | None = None
 
 
 @router.get("/agents/status")
@@ -81,6 +88,8 @@ def start_judge(
         final_count=body.final,
         ts_codes=body.ts_codes,
         force=body.force,
+        run_id=body.run_id,
+        as_of=body.as_of,
     )
     if job.get("reused"):
         response.status_code = status.HTTP_200_OK
@@ -89,7 +98,7 @@ def start_judge(
 
 @router.get("/agents/results")
 def agent_results(
-    as_of: str | None = Query(default=None, description="只返回该交易日的批次"),
+    as_of: str | None = Depends(validated_signal_date),
     limit: int = Query(default=20, ge=1, le=100),
     manager=Depends(get_agent_judge_manager),
 ) -> dict:

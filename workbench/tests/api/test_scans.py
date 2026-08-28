@@ -32,6 +32,13 @@ def test_scan_job_runs_offline(client):
     payload = wait_for_job(client, response.json()["job_id"])
     assert payload["status"] == "succeeded"
     assert payload["result"]["scored_count"] > 0
+    progress = payload["result"]["progress"]
+    assert progress["stage"] == "complete"
+    assert progress["percent"] == 100
+    assert payload["result"]["steps"]
+    assert payload["result"]["steps"][-1]["name"] == "score"
+    assert payload["result"]["steps"][-1]["status"] == "succeeded"
+    assert payload["result"]["progress"]["logs"]
 
 
 def test_unknown_scan_job_returns_not_found(client):
