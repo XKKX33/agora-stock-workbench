@@ -25,6 +25,37 @@
 - `engine/backtest.py` + `app/services/backtest.py` + `app/api/backtest.py`：滚动回测与多策略对比（净值曲线、回撤、胜率、换手、成本假设、覆盖率），默认非重叠调仓口径。
 - `engine/ml/`：因子机器学习体检（样本外 IC / AUC / 分桶单调性 / 过拟合缺口），诊断级结果如实展示。
 
+## 快速上手（首次使用）
+
+克隆后是**纯代码**，本地数据（行情、资金流、交易日历）和凭据都未入库，需要自己准备：
+
+1. **准备 Python 环境**：项目无 venv，使用本机 Python 3.11+（本机为 `C:\Users\xuan\anaconda3\python.exe`）。安装依赖：
+
+   ```powershell
+   cd workbench
+   C:\Users\xuan\anaconda3\python.exe -m pip install -r requirements.txt
+   ```
+
+2. **配置 Tushare token**：复制 `workbench/.env.example` 为 `workbench/.env` 并填入 token（未提供示例文件就手动创建 `.env`）：
+
+   ```ini
+   TUSHARE_TOKEN=你的_tushare_token
+   WORKBENCH_AI_API_KEY=你的_openai兼容_key   # 可选，不用 AI 研判可留空
+   ```
+
+   Tushare 用于联网更新 A 股行情、交易日历与资金流；没有它只能离线跑已有本地数据。
+
+3. **首次建库并拉数据**（数据库文件不存在时不会自动建空库，必须先采集一次）：
+
+   ```powershell
+   cd workbench
+   C:\Users\xuan\anaconda3\python.exe serve.py        # 先启动
+   # 在总览页点「在线选股」触发首次数据入库；或跑一次完整流程
+   C:\Users\xuan\anaconda3\python.exe -m engine.run_scan --online
+   ```
+
+   完整收盘任务链、防前视、多 Agent 研判的说明见下文「配置」。
+
 ## 本地运行
 
 工作目录：
